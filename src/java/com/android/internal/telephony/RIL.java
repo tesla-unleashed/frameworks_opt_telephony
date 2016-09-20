@@ -29,6 +29,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.res.Resources;
 import android.hardware.display.DisplayManager;
 import android.net.ConnectivityManager;
 import android.net.LocalSocket;
@@ -239,7 +240,7 @@ class RILRequest {
  *
  * {@hide}
  */
-public final class RIL extends BaseCommands implements CommandsInterface {
+public class RIL extends BaseCommands implements CommandsInterface {
     static final String RILJ_LOG_TAG = "RILJ";
     // Have a separate wakelock instance for Ack
     static final String RILJ_ACK_WAKELOCK_NAME = "RILJ_ACK_WL";
@@ -296,9 +297,14 @@ public final class RIL extends BaseCommands implements CommandsInterface {
     // When we are testing emergency calls
     AtomicBoolean mTestingEmergencyCall = new AtomicBoolean(false);
 
-    private Integer mInstanceId;
+    protected Integer mInstanceId;
 
     private TelephonyEventLog mEventLog;
+
+    // Number of per-network elements expected in QUERY_AVAILABLE_NETWORKS's response.
+    // 4 elements is default, but many RILs actually return 5, making it impossible to
+    // divide the response array without prior knowledge of the number of elements.
+    protected int mQANElements = SystemProperties.getInt("ro.ril.telephony.mqanelements", 4);
 
     //***** Events
 
@@ -602,10 +608,10 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return messageLength;
     }
 
-    class RILReceiver implements Runnable {
+    protected class RILReceiver implements Runnable {
         byte[] buffer;
 
-        RILReceiver() {
+        protected RILReceiver() {
             buffer = new byte[RIL_MAX_COMMAND_BYTES];
         }
 
@@ -667,6 +673,20 @@ public final class RIL extends BaseCommands implements CommandsInterface {
                 mSocket = s;
                 Rlog.i(RILJ_LOG_TAG, "(" + mInstanceId + ") Connected to '"
                         + rilSocket + "' socket");
+
+                // Compatibility with QCOM's DSDS (Dual SIM) stack
+                if (needsOldRilFeature("qcomdsds")) {
+                    String str = "SUB1";
+                    byte[] data = str.getBytes();
+                    try {
+                        mSocket.getOutputStream().write(data);
+                        Rlog.i(RILJ_LOG_TAG, "Data sent!");
+                    } catch (IOException ex1) {
+                        Rlog.e(RILJ_LOG_TAG, "IOException", ex1);
+                    } catch (RuntimeException ex2) {
+                        Rlog.e(RILJ_LOG_TAG, "Uncaught exception", ex2);
+                    }
+                }
 
                 int length = 0;
                 try {
@@ -769,7 +789,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
             riljLog("Not starting RILReceiver: wifi-only");
         } else {
             riljLog("Starting RILReceiver" + mInstanceId);
-            mReceiver = new RILReceiver();
+            mReceiver = createRILReceiver();
             mReceiverThread = new Thread(mReceiver, "RILReceiver" + mInstanceId);
             mReceiverThread.start();
 
@@ -789,6 +809,10 @@ public final class RIL extends BaseCommands implements CommandsInterface {
 
         TelephonyDevController tdc = TelephonyDevController.getInstance();
         tdc.registerRIL(this);
+    }
+
+    protected RILReceiver createRILReceiver() {
+        return new RILReceiver();
     }
 
     //***** CommandsInterface implementation
@@ -836,19 +860,17 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         send(rr);
     }
 
-    public void setUiccSubscription(int slotId, int appIndex, int subId,
-            int subStatus, Message result) {
+    public void setUiccSubscription(int appIndex, boolean activate, Message result) {
         //Note: This RIL request is also valid for SIM and RUIM (ICC card)
         RILRequest rr = RILRequest.obtain(RIL_REQUEST_SET_UICC_SUBSCRIPTION, result);
 
         if (RILJ_LOGD) riljLog(rr.serialString() + "> " + requestToString(rr.mRequest)
-                + " slot: " + slotId + " appIndex: " + appIndex
-                + " subId: " + subId + " subStatus: " + subStatus);
+                + " appIndex: " + appIndex + " activate: " + activate);
 
-        rr.mParcel.writeInt(slotId);
+        rr.mParcel.writeInt(mInstanceId);
         rr.mParcel.writeInt(appIndex);
-        rr.mParcel.writeInt(subId);
-        rr.mParcel.writeInt(subStatus);
+        rr.mParcel.writeInt(mInstanceId);
+        rr.mParcel.writeInt(activate ? 1 : 0);
 
         send(rr);
     }
@@ -879,9 +901,13 @@ public final class RIL extends BaseCommands implements CommandsInterface {
 
         if (RILJ_LOGD) riljLog(rr.serialString() + "> " + requestToString(rr.mRequest));
 
-        rr.mParcel.writeInt(2);
+        boolean oldRil = needsOldRilFeature("facilitylock");
+
+        rr.mParcel.writeInt(oldRil ? 1 : 2);
         rr.mParcel.writeString(pin);
-        rr.mParcel.writeString(aid);
+        if (!oldRil) {
+            rr.mParcel.writeString(aid);
+        }
 
         send(rr);
     }
@@ -899,10 +925,14 @@ public final class RIL extends BaseCommands implements CommandsInterface {
 
         if (RILJ_LOGD) riljLog(rr.serialString() + "> " + requestToString(rr.mRequest));
 
-        rr.mParcel.writeInt(3);
+        boolean oldRil = needsOldRilFeature("facilitylock");
+
+        rr.mParcel.writeInt(oldRil ? 2 : 3);
         rr.mParcel.writeString(puk);
         rr.mParcel.writeString(newPin);
-        rr.mParcel.writeString(aid);
+        if (!oldRil) {
+            rr.mParcel.writeString(aid);
+        }
 
         send(rr);
     }
@@ -920,9 +950,13 @@ public final class RIL extends BaseCommands implements CommandsInterface {
 
         if (RILJ_LOGD) riljLog(rr.serialString() + "> " + requestToString(rr.mRequest));
 
-        rr.mParcel.writeInt(2);
+        boolean oldRil = needsOldRilFeature("facilitylock");
+
+        rr.mParcel.writeInt(oldRil ? 1 : 2);
         rr.mParcel.writeString(pin);
-        rr.mParcel.writeString(aid);
+        if (!oldRil) {
+            rr.mParcel.writeString(aid);
+        }
 
         send(rr);
     }
@@ -940,10 +974,14 @@ public final class RIL extends BaseCommands implements CommandsInterface {
 
         if (RILJ_LOGD) riljLog(rr.serialString() + "> " + requestToString(rr.mRequest));
 
-        rr.mParcel.writeInt(3);
+        boolean oldRil = needsOldRilFeature("facilitylock");
+
+        rr.mParcel.writeInt(oldRil ? 2 : 3);
         rr.mParcel.writeString(puk);
         rr.mParcel.writeString(newPin2);
-        rr.mParcel.writeString(aid);
+        if (!oldRil) {
+            rr.mParcel.writeString(aid);
+        }
 
         send(rr);
     }
@@ -961,10 +999,14 @@ public final class RIL extends BaseCommands implements CommandsInterface {
 
         if (RILJ_LOGD) riljLog(rr.serialString() + "> " + requestToString(rr.mRequest));
 
-        rr.mParcel.writeInt(3);
+        boolean oldRil = needsOldRilFeature("facilitylock");
+
+        rr.mParcel.writeInt(oldRil ? 2 : 3);
         rr.mParcel.writeString(oldPin);
         rr.mParcel.writeString(newPin);
-        rr.mParcel.writeString(aid);
+        if (!oldRil) {
+            rr.mParcel.writeString(aid);
+        }
 
         send(rr);
     }
@@ -982,10 +1024,14 @@ public final class RIL extends BaseCommands implements CommandsInterface {
 
         if (RILJ_LOGD) riljLog(rr.serialString() + "> " + requestToString(rr.mRequest));
 
-        rr.mParcel.writeInt(3);
+        boolean oldRil = needsOldRilFeature("facilitylock");
+
+        rr.mParcel.writeInt(oldRil ? 2 : 3);
         rr.mParcel.writeString(oldPin2);
         rr.mParcel.writeString(newPin2);
-        rr.mParcel.writeString(aid);
+        if (!oldRil) {
+            rr.mParcel.writeString(aid);
+        }
 
         send(rr);
     }
@@ -1085,8 +1131,17 @@ public final class RIL extends BaseCommands implements CommandsInterface {
     getIMSIForApp(String aid, Message result) {
         RILRequest rr = RILRequest.obtain(RIL_REQUEST_GET_IMSI, result);
 
-        rr.mParcel.writeInt(1);
-        rr.mParcel.writeString(aid);
+        boolean skipNullAid = needsOldRilFeature("skipnullaid");
+        boolean writeAidOnly = needsOldRilFeature("writeaidonly");
+
+        if (!writeAidOnly && (aid != null || !skipNullAid)) {
+            rr.mParcel.writeInt(1);
+            rr.mParcel.writeString(aid);
+        }
+
+        if (writeAidOnly) {
+            rr.mParcel.writeString(aid);
+        }
 
         if (RILJ_LOGD) riljLog(rr.serialString() +
                               "> getIMSI: " + requestToString(rr.mRequest)
@@ -1990,18 +2045,20 @@ public final class RIL extends BaseCommands implements CommandsInterface {
                             Message response) {
         RILRequest rr = RILRequest.obtain(RIL_REQUEST_QUERY_FACILITY_LOCK, response);
 
-        if (RILJ_LOGD) riljLog(rr.serialString() + "> " + requestToString(rr.mRequest)
-                                                 + " [" + facility + " " + serviceClass
-                                                 + " " + appId + "]");
+        if (RILJ_LOGD) riljLog(rr.serialString() + "> " + requestToString(rr.mRequest));
+
+        boolean oldRil = needsOldRilFeature("facilitylock");
 
         // count strings
-        rr.mParcel.writeInt(4);
+        rr.mParcel.writeInt(oldRil ? 3 : 4);
 
         rr.mParcel.writeString(facility);
         rr.mParcel.writeString(password);
 
         rr.mParcel.writeString(Integer.toString(serviceClass));
-        rr.mParcel.writeString(appId);
+        if (!oldRil) {
+            rr.mParcel.writeString(appId);
+        }
 
         send(rr);
     }
@@ -2025,15 +2082,19 @@ public final class RIL extends BaseCommands implements CommandsInterface {
                                                         + " [" + facility + " " + lockState
                                                         + " " + serviceClass + " " + appId + "]");
 
+        boolean oldRil = needsOldRilFeature("facilitylock");
+
         // count strings
-        rr.mParcel.writeInt(5);
+        rr.mParcel.writeInt(oldRil ? 4 : 5);
 
         rr.mParcel.writeString(facility);
         lockString = (lockState)?"1":"0";
         rr.mParcel.writeString(lockString);
         rr.mParcel.writeString(password);
         rr.mParcel.writeString(Integer.toString(serviceClass));
-        rr.mParcel.writeString(appId);
+        if (!oldRil) {
+            rr.mParcel.writeString(appId);
+        }
 
         send(rr);
 
@@ -2404,7 +2465,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         }
     }
 
-    private void sendScreenState(boolean on) {
+    protected void sendScreenState(boolean on) {
         RILRequest rr = RILRequest.obtain(RIL_REQUEST_SCREEN_STATE, null);
         rr.mParcel.writeInt(1);
         rr.mParcel.writeInt(on ? 1 : 0);
@@ -2423,13 +2484,21 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         updateScreenState();
    }
 
-    private RadioState getRadioStateFromInt(int stateInt) {
+    protected RadioState getRadioStateFromInt(int stateInt) {
         RadioState state;
 
         /* RIL_RadioState ril.h */
         switch(stateInt) {
             case 0: state = RadioState.RADIO_OFF; break;
             case 1: state = RadioState.RADIO_UNAVAILABLE; break;
+            case 2:
+            case 3:
+            case 4:
+            case 5:
+            case 6:
+            case 7:
+            case 8:
+            case 9:
             case 10: state = RadioState.RADIO_ON; break;
 
             default:
@@ -2439,7 +2508,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return state;
     }
 
-    private void switchToRadioState(RadioState newState) {
+    protected void switchToRadioState(RadioState newState) {
         setRadioState(newState);
     }
 
@@ -2536,7 +2605,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         }
     }
 
-    private void
+    protected void
     send(RILRequest rr) {
         Message msg;
 
@@ -2551,7 +2620,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         msg.sendToTarget();
     }
 
-    private void
+    protected void
     processResponse (Parcel p) {
         int type;
 
@@ -2592,7 +2661,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
      * @param error is the RIL_Errno sent back
      * @param loggable true means to print all requests in mRequestList
      */
-    private void clearRequestList(int error, boolean loggable) {
+    protected void clearRequestList(int error, boolean loggable) {
         RILRequest rr;
         synchronized (mRequestList) {
             int count = mRequestList.size();
@@ -2616,7 +2685,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         }
     }
 
-    private RILRequest findAndRemoveRequestFromList(int serial) {
+    protected RILRequest findAndRemoveRequestFromList(int serial) {
         RILRequest rr = null;
         synchronized (mRequestList) {
             rr = mRequestList.get(serial);
@@ -2628,7 +2697,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return rr;
     }
 
-    private RILRequest
+    protected RILRequest
     processSolicited (Parcel p, int type) {
         int serial, error;
         boolean found = false;
@@ -2910,7 +2979,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return rr;
     }
 
-    private RadioCapability makeStaticRadioCapability() {
+    protected RadioCapability makeStaticRadioCapability() {
         // default to UNKNOWN so we fail fast.
         int raf = RadioAccessFamily.RAF_UNKNOWN;
 
@@ -3021,7 +3090,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return s;
     }
 
-    private void
+    protected void
     processUnsolicited (Parcel p, int type) {
         int response;
         Object ret;
@@ -3228,6 +3297,11 @@ public final class RIL extends BaseCommands implements CommandsInterface {
             break;
             case RIL_UNSOL_DATA_CALL_LIST_CHANGED:
                 if (RILJ_LOGD) unsljLogRet(response, ret);
+
+                boolean oldRil = needsOldRilFeature("skipbrokendatacall");
+                if (oldRil && "IP".equals(((ArrayList<DataCallResponse>) ret).get(0).type)) {
+                    break;
+                }
 
                 mDataNetworkStateRegistrants.notifyRegistrants(new AsyncResult(null, ret, null));
             break;
@@ -3457,6 +3531,9 @@ public final class RIL extends BaseCommands implements CommandsInterface {
 
                 // Initial conditions
                 setRadioPower(false, null);
+                if (needsOldRilFeature("setPrefNwTypeOnUnsolConnected")) {
+                    setPreferredNetworkType(mPreferredNetworkType, null);
+                }
                 setCdmaSubscriptionSource(mCdmaSubscription, null);
                 setCellInfoListRate(Integer.MAX_VALUE, null);
                 notifyRegistrantsRilConnectionChanged(((int[])ret)[0]);
@@ -3554,7 +3631,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
      *
      * @param rilVer is the version of the ril or -1 if disconnected.
      */
-    private void notifyRegistrantsRilConnectionChanged(int rilVer) {
+    protected void notifyRegistrantsRilConnectionChanged(int rilVer) {
         mRilVersion = rilVer;
         if (mRilConnectedRegistrants != null) {
             mRilConnectedRegistrants.notifyRegistrants(
@@ -3562,7 +3639,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         }
     }
 
-    private Object
+    protected Object
     responseInts(Parcel p) {
         int numInts;
         int response[];
@@ -3578,7 +3655,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return response;
     }
 
-    private Object
+    protected Object
     responseFailCause(Parcel p) {
         LastCallFailCause failCause = new LastCallFailCause();
         failCause.causeCode = p.readInt();
@@ -3588,12 +3665,12 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return failCause;
     }
 
-    private Object
+    protected Object
     responseVoid(Parcel p) {
         return null;
     }
 
-    private Object
+    protected Object
     responseCallForward(Parcel p) {
         int numInfos;
         CallForwardInfo infos[];
@@ -3616,7 +3693,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return infos;
     }
 
-    private Object
+    protected Object
     responseSuppServiceNotification(Parcel p) {
         SuppServiceNotification notification = new SuppServiceNotification();
 
@@ -3629,7 +3706,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return notification;
     }
 
-    private Object
+    protected Object
     responseCdmaSms(Parcel p) {
         SmsMessage sms;
         sms = SmsMessage.newFromParcel(p);
@@ -3637,7 +3714,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return sms;
     }
 
-    private Object
+    protected Object
     responseString(Parcel p) {
         String response;
 
@@ -3646,7 +3723,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return response;
     }
 
-    private Object
+    protected Object
     responseStrings(Parcel p) {
         int num;
         String response[];
@@ -3656,7 +3733,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return response;
     }
 
-    private Object
+    protected Object
     responseRaw(Parcel p) {
         int num;
         byte response[];
@@ -3666,7 +3743,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return response;
     }
 
-    private Object
+    protected Object
     responseSMS(Parcel p) {
         int messageRef, errorCode;
         String ackPDU;
@@ -3681,7 +3758,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
     }
 
 
-    private Object
+    protected Object
     responseICC_IO(Parcel p) {
         int sw1, sw2;
         Message ret;
@@ -3699,7 +3776,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return new IccIoResult(sw1, sw2, s);
     }
 
-    private Object
+    protected Object
     responseICC_IOBase64(Parcel p) {
         int sw1, sw2;
         Message ret;
@@ -3718,16 +3795,30 @@ public final class RIL extends BaseCommands implements CommandsInterface {
                 ? android.util.Base64.decode(s, android.util.Base64.DEFAULT) : (byte[]) null);
     }
 
-    private Object
+    @Override
+    public boolean needsOldRilFeature(String feature) {
+        String[] features = SystemProperties.get("ro.telephony.ril.config", "").split(",");
+        for (String found : features) {
+            if (found.equals(feature)) return true;
+        }
+        return false;
+    }
+
+    protected Object
     responseIccCardStatus(Parcel p) {
         IccCardApplicationStatus appStatus;
+
+        boolean oldRil = needsOldRilFeature("icccardstatus");
 
         IccCardStatus cardStatus = new IccCardStatus();
         cardStatus.setCardState(p.readInt());
         cardStatus.setUniversalPinState(p.readInt());
         cardStatus.mGsmUmtsSubscriptionAppIndex = p.readInt();
         cardStatus.mCdmaSubscriptionAppIndex = p.readInt();
-        cardStatus.mImsSubscriptionAppIndex = p.readInt();
+        if (!oldRil) {
+            cardStatus.mImsSubscriptionAppIndex = p.readInt();
+        }
+
         int numApplications = p.readInt();
 
         // limit to maximum allowed applications
@@ -3750,7 +3841,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return cardStatus;
     }
 
-    private Object
+    protected Object
     responseSimRefresh(Parcel p) {
         IccRefreshResponse response = new IccRefreshResponse();
 
@@ -3760,7 +3851,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return response;
     }
 
-    private Object
+    protected Object
     responseCallList(Parcel p) {
         int num;
         int voiceSettings;
@@ -3838,7 +3929,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return response;
     }
 
-    private DataCallResponse getDataCallResponse(Parcel p, int version) {
+    protected DataCallResponse getDataCallResponse(Parcel p, int version) {
         DataCallResponse dataCall = new DataCallResponse();
 
         dataCall.version = version;
@@ -3846,13 +3937,24 @@ public final class RIL extends BaseCommands implements CommandsInterface {
             dataCall.cid = p.readInt();
             dataCall.active = p.readInt();
             dataCall.type = p.readString();
+            if (version < 4 || needsOldRilFeature("datacallapn")) {
+                p.readString(); // APN not used
+            }
             String addresses = p.readString();
             if (!TextUtils.isEmpty(addresses)) {
                 dataCall.addresses = addresses.split(" ");
             }
+            // DataCallState needs an ifname. Since we don't have one,
+            // use the name from the ThrottleService resource. (default = rmnet0)
+            dataCall.ifname = Resources.getSystem().getString(
+                                                com.android.internal.R.string.config_datause_iface);
         } else {
             dataCall.status = p.readInt();
-            dataCall.suggestedRetryTime = p.readInt();
+            if (needsOldRilFeature("usehcradio")) {
+                dataCall.suggestedRetryTime = -1;
+            } else {
+                dataCall.suggestedRetryTime = p.readInt();
+            }
             dataCall.cid = p.readInt();
             dataCall.active = p.readInt();
             dataCall.type = p.readString();
@@ -3886,11 +3988,11 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return dataCall;
     }
 
-    private Object
+    protected Object
     responseDataCallList(Parcel p) {
         ArrayList<DataCallResponse> response;
-
-        int ver = p.readInt();
+        boolean oldRil = needsOldRilFeature("datacall");
+        int ver = (oldRil ? 3 : p.readInt());
         int num = p.readInt();
         riljLog("responseDataCallList ver=" + ver + " num=" + num);
 
@@ -3904,9 +4006,10 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return response;
     }
 
-    private Object
+    protected Object
     responseSetupDataCall(Parcel p) {
-        int ver = p.readInt();
+        boolean oldRil = needsOldRilFeature("datacall");
+        int ver = (oldRil ? 3 : p.readInt());
         int num = p.readInt();
         if (RILJ_LOGV) riljLog("responseSetupDataCall ver=" + ver + " num=" + num);
 
@@ -3958,20 +4061,20 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return dataCall;
     }
 
-    private Object
+    protected Object
     responseOperatorInfos(Parcel p) {
         String strings[] = (String [])responseStrings(p);
         ArrayList<OperatorInfo> ret;
 
-        if (strings.length % 4 != 0) {
+        if (strings.length % mQANElements != 0) {
             throw new RuntimeException(
                 "RIL_REQUEST_QUERY_AVAILABLE_NETWORKS: invalid response. Got "
-                + strings.length + " strings, expected multible of 4");
+                + strings.length + " strings, expected multiple of " + mQANElements);
         }
 
-        ret = new ArrayList<OperatorInfo>(strings.length / 4);
+        ret = new ArrayList<OperatorInfo>(strings.length / mQANElements);
 
-        for (int i = 0 ; i < strings.length ; i += 4) {
+        for (int i = 0 ; i < strings.length ; i += mQANElements) {
             ret.add (
                 new OperatorInfo(
                     strings[i+0],
@@ -3983,7 +4086,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return ret;
     }
 
-    private Object
+    protected Object
     responseCellList(Parcel p) {
        int num, rssi;
        String location;
@@ -4011,7 +4114,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
        return response;
     }
 
-    private Object responseGetPreferredNetworkType(Parcel p) {
+    protected Object responseGetPreferredNetworkType(Parcel p) {
        int [] response = (int[]) responseInts(p);
 
        if (response.length >= 1) {
@@ -4023,7 +4126,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
        return response;
     }
 
-    private Object responseGmsBroadcastConfig(Parcel p) {
+    protected Object responseGmsBroadcastConfig(Parcel p) {
         int num;
         ArrayList<SmsBroadcastConfigInfo> response;
         SmsBroadcastConfigInfo info;
@@ -4045,7 +4148,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return response;
     }
 
-    private Object
+    protected Object
     responseCdmaBroadcastConfig(Parcel p) {
         int numServiceCategories;
         int response[];
@@ -4084,7 +4187,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return response;
     }
 
-    private Object
+    protected Object
     responseSignalStrength(Parcel p) {
         // Assume this is gsm, but doesn't matter as ServiceStateTracker
         // sets the proper value.
@@ -4092,7 +4195,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return signalStrength;
     }
 
-    private ArrayList<CdmaInformationRecords>
+    protected ArrayList<CdmaInformationRecords>
     responseCdmaInformationRecord(Parcel p) {
         int numberOfInfoRecs;
         ArrayList<CdmaInformationRecords> response;
@@ -4112,7 +4215,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return response;
     }
 
-    private Object
+    protected Object
     responseCdmaCallWaiting(Parcel p) {
         CdmaCallWaitingNotification notification = new CdmaCallWaitingNotification();
 
@@ -4131,7 +4234,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return notification;
     }
 
-    private Object
+    protected Object
     responseCallRing(Parcel p){
         char response[] = new char[4];
 
@@ -4145,7 +4248,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return response;
     }
 
-    private void
+    protected void
     notifyRegistrantsCdmaInfoRec(CdmaInformationRecords infoRec) {
         int response = RIL_UNSOL_CDMA_INFO_REC;
         if (infoRec.record instanceof CdmaInformationRecords.CdmaDisplayInfoRec) {
@@ -4193,7 +4296,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         }
     }
 
-    private ArrayList<CellInfo> responseCellInfoList(Parcel p) {
+    protected ArrayList<CellInfo> responseCellInfoList(Parcel p) {
         int numberOfInfoRecs;
         ArrayList<CellInfo> response;
 
@@ -4212,7 +4315,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return response;
     }
 
-   private Object
+   protected Object
    responseHardwareConfig(Parcel p) {
       int num;
       ArrayList<HardwareConfig> response;
@@ -4250,7 +4353,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
       return response;
    }
 
-    private Object
+    protected Object
     responseRadioCapability(Parcel p) {
         int version = p.readInt();
         int session = p.readInt();
@@ -4270,7 +4373,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return rc;
     }
 
-    private Object responseLceData(Parcel p) {
+    protected Object responseLceData(Parcel p) {
         final ArrayList<Integer> capacityResponse = new ArrayList<Integer>();
         final int capacityDownKbps = p.readInt();
         final int confidenceLevel = p.readByte();
@@ -4287,7 +4390,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return capacityResponse;
     }
 
-    private Object responseLceStatus(Parcel p) {
+    protected Object responseLceStatus(Parcel p) {
         final ArrayList<Integer> statusResponse = new ArrayList<Integer>();
         final int lceStatus = (int)p.readByte();
         final int actualInterval = p.readInt();
@@ -4300,7 +4403,7 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         return statusResponse;
     }
 
-    private Object responseActivityData(Parcel p) {
+    protected Object responseActivityData(Parcel p) {
         final int sleepModeTimeMs = p.readInt();
         final int idleModeTimeMs = p.readInt();
         int [] txModeTimeMs = new int[ModemActivityInfo.TX_POWER_LEVELS];
@@ -4571,29 +4674,29 @@ public final class RIL extends BaseCommands implements CommandsInterface {
         }
     }
 
-    private void riljLog(String msg) {
+    protected void riljLog(String msg) {
         Rlog.d(RILJ_LOG_TAG, msg
                 + (mInstanceId != null ? (" [SUB" + mInstanceId + "]") : ""));
     }
 
-    private void riljLogv(String msg) {
+    protected void riljLogv(String msg) {
         Rlog.v(RILJ_LOG_TAG, msg
                 + (mInstanceId != null ? (" [SUB" + mInstanceId + "]") : ""));
     }
 
-    private void unsljLog(int response) {
+    protected void unsljLog(int response) {
         riljLog("[UNSL]< " + responseToString(response));
     }
 
-    private void unsljLogMore(int response, String more) {
+    protected void unsljLogMore(int response, String more) {
         riljLog("[UNSL]< " + responseToString(response) + " " + more);
     }
 
-    private void unsljLogRet(int response, Object ret) {
+    protected void unsljLogRet(int response, Object ret) {
         riljLog("[UNSL]< " + responseToString(response) + " " + retToString(response, ret));
     }
 
-    private void unsljLogvRet(int response, Object ret) {
+    protected void unsljLogvRet(int response, Object ret) {
         riljLogv("[UNSL]< " + responseToString(response) + " " + retToString(response, ret));
     }
 
@@ -4963,6 +5066,17 @@ public final class RIL extends BaseCommands implements CommandsInterface {
      */
     @Override
     public void iccOpenLogicalChannel(String AID, Message response) {
+
+        if (mRilVersion < 10) {
+            if (response != null) {
+                CommandException ex = new CommandException(
+                        CommandException.Error.REQUEST_NOT_SUPPORTED);
+                AsyncResult.forMessage(response, null, ex);
+                response.sendToTarget();
+            }
+            return;
+        }
+
         RILRequest rr = RILRequest.obtain(RIL_REQUEST_SIM_OPEN_CHANNEL, response);
         rr.mParcel.writeString(AID);
 
@@ -5005,6 +5119,17 @@ public final class RIL extends BaseCommands implements CommandsInterface {
     @Override
     public void iccTransmitApduLogicalChannel(int channel, int cla, int instruction,
             int p1, int p2, int p3, String data, Message response) {
+
+        if (mRilVersion < 10) {
+            if (response != null) {
+                CommandException ex = new CommandException(
+                        CommandException.Error.REQUEST_NOT_SUPPORTED);
+                AsyncResult.forMessage(response, null, ex);
+                response.sendToTarget();
+            }
+            return;
+        }
+
         if (channel <= 0) {
             throw new RuntimeException(
                 "Invalid channel in iccTransmitApduLogicalChannel: " + channel);
@@ -5044,6 +5169,17 @@ public final class RIL extends BaseCommands implements CommandsInterface {
      */
     private void iccTransmitApduHelper(int rilCommand, int channel, int cla,
             int instruction, int p1, int p2, int p3, String data, Message response) {
+
+        if (mRilVersion < 10) {
+            if (response != null) {
+                CommandException ex = new CommandException(
+                        CommandException.Error.REQUEST_NOT_SUPPORTED);
+                AsyncResult.forMessage(response, null, ex);
+                response.sendToTarget();
+            }
+            return;
+        }
+
         RILRequest rr = RILRequest.obtain(rilCommand, response);
         rr.mParcel.writeInt(channel);
         rr.mParcel.writeInt(cla);
