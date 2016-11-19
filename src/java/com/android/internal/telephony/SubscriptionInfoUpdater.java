@@ -74,8 +74,10 @@ public class SubscriptionInfoUpdater extends Handler {
     private static final int EVENT_SIM_LOCKED = 5;
     private static final int EVENT_SIM_IO_ERROR = 6;
     private static final int EVENT_SIM_UNKNOWN = 7;
+    private static final int EVENT_SIM_RESTRICTED = 8;
 
     private static final String ICCID_STRING_FOR_NO_SIM = "";
+    private static final String ICCID_STRING_FOR_NV = "DUMMY_NV_ID";
     /**
      *  int[] sInsertSimState maintains all slots' SIM inserted status currently,
      *  it may contain 4 kinds of values:
@@ -114,6 +116,8 @@ public class SubscriptionInfoUpdater extends Handler {
     // The current foreground user ID.
     private int mCurrentlyActiveUserId;
     private CarrierServiceBindHelper mCarrierServiceBindHelper;
+    private boolean mIsShutdown;
+    private int mCurrentSimCount;
 
     public SubscriptionInfoUpdater(Context context, Phone[] phone, CommandsInterface[] ci) {
         logd("Constructor invoked");
@@ -123,10 +127,12 @@ public class SubscriptionInfoUpdater extends Handler {
         mSubscriptionManager = SubscriptionManager.from(mContext);
         mPackageManager = IPackageManager.Stub.asInterface(ServiceManager.getService("package"));
         mUserManager = (UserManager) mContext.getSystemService(Context.USER_SERVICE);
+        mIsShutdown = false;
 
         IntentFilter intentFilter = new IntentFilter(TelephonyIntents.ACTION_SIM_STATE_CHANGED);
         intentFilter.addAction(IccCardProxy.ACTION_INTERNAL_SIM_STATE_CHANGED);
         intentFilter.addAction(Intent.ACTION_USER_UNLOCKED);
+        intentFilter.addAction(Intent.ACTION_SHUTDOWN);
         mContext.registerReceiver(sReceiver, intentFilter);
 
         mCarrierServiceBindHelper = new CarrierServiceBindHelper(mContext);
@@ -147,7 +153,8 @@ public class SubscriptionInfoUpdater extends Handler {
                         throws RemoteException {
                     mCurrentlyActiveUserId = newUserId;
                     CarrierAppUtils.disableCarrierAppsUntilPrivileged(mContext.getOpPackageName(),
-                            mPackageManager, TelephonyManager.getDefault(), mCurrentlyActiveUserId);
+                            mPackageManager, TelephonyManager.getDefault(),
+                            mContext.getContentResolver(), mCurrentlyActiveUserId);
 
                     if (reply != null) {
                         try {
@@ -166,13 +173,14 @@ public class SubscriptionInfoUpdater extends Handler {
                 public void onForegroundProfileSwitch(int newProfileId) throws RemoteException {
                     // Ignore.
                 }
-            });
+            }, LOG_TAG);
             mCurrentlyActiveUserId = ActivityManagerNative.getDefault().getCurrentUser().id;
         } catch (RemoteException e) {
             logd("Couldn't get current user ID; guessing it's 0: " + e.getMessage());
         }
         CarrierAppUtils.disableCarrierAppsUntilPrivileged(mContext.getOpPackageName(),
-                mPackageManager, TelephonyManager.getDefault(), mCurrentlyActiveUserId);
+                mPackageManager, TelephonyManager.getDefault(), mContext.getContentResolver(),
+                mCurrentlyActiveUserId);
     }
 
     private final BroadcastReceiver sReceiver = new  BroadcastReceiver() {
@@ -194,8 +202,12 @@ public class SubscriptionInfoUpdater extends Handler {
                     ActivityManagerNative.broadcastStickyIntent(i, READ_PHONE_STATE,
                             UserHandle.USER_ALL);
                 }
-                rebroadcastIntentsOnUnlock = null;
                 logd("[Receiver]-");
+                return;
+            }
+
+            if (action.equals(Intent.ACTION_SHUTDOWN)) {
+                mIsShutdown = true;
                 return;
             }
 
@@ -215,12 +227,15 @@ public class SubscriptionInfoUpdater extends Handler {
             logd("simStatus: " + simStatus);
 
             if (action.equals(TelephonyIntents.ACTION_SIM_STATE_CHANGED)) {
+                rebroadcastIntentsOnUnlock.put(slotId, intent);
                 if (IccCardConstants.INTENT_VALUE_ICC_ABSENT.equals(simStatus)) {
                     sendMessage(obtainMessage(EVENT_SIM_ABSENT, slotId, -1));
                 } else if (IccCardConstants.INTENT_VALUE_ICC_UNKNOWN.equals(simStatus)) {
                     sendMessage(obtainMessage(EVENT_SIM_UNKNOWN, slotId, -1));
                 } else if (IccCardConstants.INTENT_VALUE_ICC_CARD_IO_ERROR.equals(simStatus)) {
                     sendMessage(obtainMessage(EVENT_SIM_IO_ERROR, slotId, -1));
+                } else if (IccCardConstants.INTENT_VALUE_ICC_CARD_RESTRICTED.equals(simStatus)) {
+                    sendMessage(obtainMessage(EVENT_SIM_RESTRICTED, slotId, -1));
                 } else {
                     logd("Ignoring simStatus: " + simStatus);
                 }
@@ -339,6 +354,10 @@ public class SubscriptionInfoUpdater extends Handler {
                 handleSimAbsentOrError(msg.arg1, IccCardConstants.INTENT_VALUE_ICC_CARD_IO_ERROR);
                 break;
 
+            case EVENT_SIM_RESTRICTED:
+                updateCarrierServices(msg.arg1, IccCardConstants.INTENT_VALUE_ICC_CARD_RESTRICTED);
+                break;
+
             default:
                 logd("Unknown msg:" + msg.what);
         }
@@ -425,17 +444,12 @@ public class SubscriptionInfoUpdater extends Handler {
             ContentResolver contentResolver = mContext.getContentResolver();
 
             if (msisdn != null) {
-                ContentValues number = new ContentValues(1);
-                number.put(SubscriptionManager.NUMBER, msisdn);
-                contentResolver.update(SubscriptionManager.CONTENT_URI, number,
-                        SubscriptionManager.UNIQUE_KEY_SUBSCRIPTION_ID + "="
-                        + Long.toString(subId), null);
+                   SubscriptionController.getInstance().setDisplayNumber(msisdn, subId);
             }
 
             SubscriptionInfo subInfo = mSubscriptionManager.getActiveSubscriptionInfo(subId);
             String nameToSet;
             String simCarrierName = tm.getSimOperatorName(subId);
-            ContentValues name = new ContentValues(1);
 
             if (subInfo != null && subInfo.getNameSource() !=
                     SubscriptionManager.NAME_SOURCE_USER_INPUT) {
@@ -444,11 +458,8 @@ public class SubscriptionInfoUpdater extends Handler {
                 } else {
                     nameToSet = "CARD " + Integer.toString(slotId + 1);
                 }
-                name.put(SubscriptionManager.DISPLAY_NAME, nameToSet);
                 logd("sim name = " + nameToSet);
-                contentResolver.update(SubscriptionManager.CONTENT_URI, name,
-                        SubscriptionManager.UNIQUE_KEY_SUBSCRIPTION_ID
-                        + "=" + Long.toString(subId), null);
+                SubscriptionController.getInstance().setDisplayName(nameToSet, subId);
             }
 
             /* Update preferred network type and network selection mode on SIM change.
@@ -502,7 +513,8 @@ public class SubscriptionInfoUpdater extends Handler {
 
         // Update set of enabled carrier apps now that the privilege rules may have changed.
         CarrierAppUtils.disableCarrierAppsUntilPrivileged(mContext.getOpPackageName(),
-                mPackageManager, TelephonyManager.getDefault(), mCurrentlyActiveUserId);
+                mPackageManager, TelephonyManager.getDefault(), mContext.getContentResolver(),
+                mCurrentlyActiveUserId);
 
         broadcastSimStateChanged(slotId, IccCardConstants.INTENT_VALUE_ICC_LOADED, null);
         updateCarrierServices(slotId, IccCardConstants.INTENT_VALUE_ICC_LOADED);
@@ -524,6 +536,15 @@ public class SubscriptionInfoUpdater extends Handler {
             updateSubscriptionInfoByIccId();
         }
         updateCarrierServices(slotId, simState);
+    }
+
+    public void updateSubIdForNV(int slotId) {
+        mIccId[slotId] = ICCID_STRING_FOR_NV;
+        logd("[updateSubIdForNV]+ Start");
+        if (isAllIccIdQueryDone()) {
+            logd("[updateSubIdForNV]+ updating");
+            updateSubscriptionInfoByIccId();
+        }
     }
 
     /**
@@ -664,12 +685,18 @@ public class SubscriptionInfoUpdater extends Handler {
             }
         }
 
+        mCurrentSimCount = insertedSimCount;
+
         // Ensure the modems are mapped correctly
         mSubscriptionManager.setDefaultDataSubId(
                 mSubscriptionManager.getDefaultDataSubscriptionId());
 
         SubscriptionController.getInstance().notifySubscriptionInfoChanged();
         logd("updateSubscriptionInfoByIccId:- SsubscriptionInfo update complete");
+    }
+
+    protected int getInsertedSimCount() {
+        return mCurrentSimCount;
     }
 
     private boolean isNewSim(String iccId, String[] oldIccId) {
@@ -700,9 +727,7 @@ public class SubscriptionInfoUpdater extends Handler {
         logd("Broadcasting intent ACTION_SIM_STATE_CHANGED " + state + " reason " + reason +
              " for mCardIndex: " + slotId);
         ActivityManagerNative.broadcastStickyIntent(i, READ_PHONE_STATE, UserHandle.USER_ALL);
-        if (!mUserManager.isUserUnlocked()) {
-            rebroadcastIntentsOnUnlock.put(slotId, i);
-        }
+        rebroadcastIntentsOnUnlock.put(slotId, i);
     }
 
     public void dispose() {

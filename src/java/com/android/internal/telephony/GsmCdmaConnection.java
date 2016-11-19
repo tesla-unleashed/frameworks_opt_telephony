@@ -71,6 +71,8 @@ public class GsmCdmaConnection extends Connection {
 
     private PowerManager.WakeLock mPartialWakeLock;
 
+    private boolean mIsEmergencyCall = false;
+
     // The cached delay to be used between DTMF tones fetched from carrier config.
     private int mDtmfToneDelay = 0;
 
@@ -116,7 +118,7 @@ public class GsmCdmaConnection extends Connection {
 
     //***** Constructors
 
-    /** This is probably an MT call that we first saw in a CLCC response */
+    /** This is probably an MT call that we first saw in a CLCC response or a hand over. */
     public GsmCdmaConnection (GsmCdmaPhone phone, DriverCall dc, GsmCdmaCallTracker ct, int index) {
         super(phone.getPhoneType());
         createWakeLock(phone.getContext());
@@ -126,7 +128,7 @@ public class GsmCdmaConnection extends Connection {
         mHandler = new MyHandler(mOwner.getLooper());
 
         mAddress = dc.number;
-
+        mIsEmergencyCall = PhoneNumberUtils.isLocalEmergencyNumber(phone.getContext(), mAddress);
         mIsIncoming = dc.isMT;
         mCreateTime = System.currentTimeMillis();
         mCnapName = dc.name;
@@ -144,7 +146,7 @@ public class GsmCdmaConnection extends Connection {
 
     /** This is an MO call, created when dialing */
     public GsmCdmaConnection (GsmCdmaPhone phone, String dialString, GsmCdmaCallTracker ct,
-                              GsmCdmaCall parent) {
+                              GsmCdmaCall parent, boolean isEmergencyCall) {
         super(phone.getPhoneType());
         createWakeLock(phone.getContext());
         acquireWakeLock();
@@ -152,16 +154,28 @@ public class GsmCdmaConnection extends Connection {
         mOwner = ct;
         mHandler = new MyHandler(mOwner.getLooper());
 
-        if (isPhoneTypeGsm()) {
+        boolean showOrigDialString = false;
+        if (phone != null) {
+            CarrierConfigManager configManager = (CarrierConfigManager)phone.getContext().
+                    getSystemService(Context.CARRIER_CONFIG_SERVICE);
+            PersistableBundle pb = configManager.getConfigForSubId(phone.getSubId());
+            if (pb != null) {
+                showOrigDialString = pb.getBoolean("config_show_orig_dial_string_for_cdma");
+            }
+        }
+        if (isPhoneTypeGsm() || showOrigDialString) {
             mDialString = dialString;
         } else {
-            Rlog.d(LOG_TAG, "[GsmCdmaConn] GsmCdmaConnection: dialString=" + maskDialString(dialString));
+            Rlog.d(LOG_TAG, "[GsmCdmaConn] GsmCdmaConnection: dialString=" +
+                    maskDialString(dialString));
             dialString = formatDialString(dialString);
             Rlog.d(LOG_TAG,
-                    "[GsmCdmaConn] GsmCdmaConnection:formated dialString=" + maskDialString(dialString));
+                    "[GsmCdmaConn] GsmCdmaConnection:formated dialString=" +
+                            maskDialString(dialString));
         }
 
         mAddress = PhoneNumberUtils.extractNetworkPortionAlt(dialString);
+        mIsEmergencyCall = isEmergencyCall;
         mPostDialString = PhoneNumberUtils.extractPostDialPortion(dialString);
 
         mIndex = -1;
@@ -215,6 +229,9 @@ public class GsmCdmaConnection extends Connection {
 
     public void dispose() {
         clearPostDialListeners();
+        if (mParent != null) {
+            mParent.detach(this);
+        }
         releaseAllWakeLocks();
     }
 
@@ -419,149 +436,16 @@ public class GsmCdmaConnection extends Connection {
          */
 
         switch (causeCode) {
-            case CallFailCause.NO_ROUTE_TO_DESTINAON:
-                return DisconnectCause.NO_ROUTE_TO_DESTINAON;
-
-            case CallFailCause.CHANNEL_UNACCEPTABLE:
-                return DisconnectCause.CHANNEL_UNACCEPTABLE;
-
-            case CallFailCause.OPERATOR_DETERMINED_BARRING:
-                return DisconnectCause.OPERATOR_DETERMINED_BARRING;
-
-            case CallFailCause.CALL_FAIL_NO_USER_RESPONDING:
-                return DisconnectCause.CALL_FAIL_NO_USER_RESPONDING;
-
-            case CallFailCause.CALL_FAIL_NO_ANSWER_FROM_USER:
-                return DisconnectCause.CALL_FAIL_NO_ANSWER_FROM_USER;
-
-            case CallFailCause.CALL_REJECTED:
-                return DisconnectCause.CALL_REJECTED;
-
-            case CallFailCause.NUMBER_CHANGED:
-                return DisconnectCause.NUMBER_CHANGED;
-
-            case CallFailCause.PREEMPTION:
-                return DisconnectCause.PREEMPTION;
-
-            case CallFailCause.CALL_FAIL_DESTINATION_OUT_OF_ORDER:
-                return DisconnectCause.CALL_FAIL_DESTINATION_OUT_OF_ORDER;
-
-            case CallFailCause.INVALID_NUMBER:
-                return DisconnectCause.INVALID_NUMBER;
-
-            case CallFailCause.FACILITY_REJECTED:
-                return DisconnectCause.FACILITY_REJECTED;
-
-            case CallFailCause.STATUS_ENQUIRY:
-                return DisconnectCause.RESP_TO_STATUS_ENQUIRY;
-
-            case CallFailCause.NORMAL_UNSPECIFIED:
-                return DisconnectCause.NORMAL_UNSPECIFIED;
-
-            case CallFailCause.NO_CIRCUIT_AVAIL:
-                return DisconnectCause.NO_CIRCUIT_AVAIL;
-
-            case CallFailCause.NETWORK_OUT_OF_ORDER:
-                return DisconnectCause.NETWORK_OUT_OF_ORDER;
-
-            case CallFailCause.TEMPORARY_FAILURE:
-                return DisconnectCause.TEMPORARY_FAILURE;
-
-            case CallFailCause.SWITCHING_CONGESTION:
-                return DisconnectCause.SWITCHING_EQUIPMENT_CONGESTION;
-
-            case CallFailCause.ACCESS_INFORMATION_DISCARDED:
-                return DisconnectCause.ACCESS_INFORMATION_DISCARDED;
-
-            case CallFailCause.CHANNEL_NOT_AVAIL:
-                return DisconnectCause.REQUESTED_CIRCUIT_OR_CHANNEL_NOT_AVAILABLE;
-
-            case CallFailCause.RESOURCES_UNAVAILABLE_OR_UNSPECIFIED:
-                return DisconnectCause.RESOURCES_UNAVAILABLE_OR_UNSPECIFIED;
-
-            case CallFailCause.QOS_NOT_AVAIL:
-                return DisconnectCause.QOS_UNAVAILABLE;
-
-            case CallFailCause.REQUESTED_FACILITY_NOT_SUBSCRIBED:
-                return DisconnectCause.REQUESTED_FACILITY_NOT_SUBSCRIBED;
-
-            case CallFailCause.INCOMING_CALLS_BARRED_WITHIN_CUG:
-                return DisconnectCause.INCOMING_CALLS_BARRED_WITHIN_CUG;
-
-            case CallFailCause.BEARER_CAPABILITY_NOT_AUTHORIZED:
-                return DisconnectCause.BEARER_CAPABILITY_NOT_AUTHORIZED;
-
-            case CallFailCause.BEARER_NOT_AVAIL:
-                return DisconnectCause.BEARER_CAPABILITY_UNAVAILABLE;
-
-            case CallFailCause.SERVICE_OPTION_NOT_AVAILABLE:
-                return DisconnectCause.SERVICE_OPTION_NOT_AVAILABLE;
-
-            case CallFailCause.BEARER_SERVICE_NOT_IMPLEMENTED:
-                return DisconnectCause.BEARER_SERVICE_NOT_IMPLEMENTED;
-
-            case CallFailCause.REQUESTED_FACILITY_NOT_IMPLEMENTED:
-                return DisconnectCause.REQUESTED_FACILITY_NOT_IMPLEMENTED;
-
-            case CallFailCause.ONLY_DIGITAL_INFORMATION_BEARER_AVAILABLE:
-                return DisconnectCause.ONLY_DIGITAL_INFORMATION_BEARER_AVAILABLE;
-
-            case CallFailCause.SERVICE_OR_OPTION_NOT_IMPLEMENTED:
-                return DisconnectCause.SERVICE_OR_OPTION_NOT_IMPLEMENTED;
-
-            case CallFailCause.INVALID_TRANSACTION_IDENTIFIER:
-                return DisconnectCause.INVALID_TRANSACTION_IDENTIFIER;
-
-            case CallFailCause.USER_NOT_MEMBER_OF_CUG:
-                return DisconnectCause.USER_NOT_MEMBER_OF_CUG;
-
-            case CallFailCause.INCOMPATIBLE_DESTINATION:
-                return DisconnectCause.INCOMPATIBLE_DESTINATION;
-
-            case CallFailCause.INVALID_TRANSIT_NW_SELECTION:
-                return DisconnectCause.INVALID_TRANSIT_NW_SELECTION;
-
-            case CallFailCause.SEMANTICALLY_INCORRECT_MESSAGE:
-                return DisconnectCause.SEMANTICALLY_INCORRECT_MESSAGE;
-
-            case CallFailCause.INVALID_MANDATORY_INFORMATION:
-                return DisconnectCause.INVALID_MANDATORY_INFORMATION;
-
-            case CallFailCause.MESSAGE_TYPE_NON_IMPLEMENTED:
-                return DisconnectCause.MESSAGE_TYPE_NON_IMPLEMENTED;
-
-            case CallFailCause.MESSAGE_TYPE_NOT_COMPATIBLE_WITH_PROTOCOL_STATE:
-                return DisconnectCause.MESSAGE_TYPE_NOT_COMPATIBLE_WITH_PROTOCOL_STATE;
-
-            case CallFailCause.INFORMATION_ELEMENT_NON_EXISTENT:
-                return DisconnectCause.INFORMATION_ELEMENT_NON_EXISTENT;
-
-            case CallFailCause.CONDITIONAL_IE_ERROR:
-                return DisconnectCause.CONDITIONAL_IE_ERROR;
-
-            case CallFailCause.MESSAGE_NOT_COMPATIBLE_WITH_PROTOCOL_STATE:
-                return DisconnectCause.MESSAGE_NOT_COMPATIBLE_WITH_PROTOCOL_STATE;
-
-            case CallFailCause.RECOVERY_ON_TIMER_EXPIRED:
-                return DisconnectCause.RECOVERY_ON_TIMER_EXPIRED;
-
-            case CallFailCause.PROTOCOL_ERROR_UNSPECIFIED:
-                return DisconnectCause.PROTOCOL_ERROR_UNSPECIFIED;
-
-            case CallFailCause.INTERWORKING_UNSPECIFIED:
-                return DisconnectCause.INTERWORKING_UNSPECIFIED;
-
-            case CallFailCause.EMERGENCY_TEMP_FAILURE:
-                return DisconnectCause.EMERGENCY_TEMP_FAILURE;
-
-            case CallFailCause.EMERGENCY_PERM_FAILURE:
-                return DisconnectCause.EMERGENCY_PERM_FAILURE;
-
-            case CallFailCause.NON_SELECTED_USER_CLEARING:
-                return DisconnectCause.NON_SELECTED_USER_CLEARING;
-
             case CallFailCause.USER_BUSY:
                 return DisconnectCause.BUSY;
+
+            case CallFailCause.NO_CIRCUIT_AVAIL:
+            case CallFailCause.TEMPORARY_FAILURE:
+            case CallFailCause.SWITCHING_CONGESTION:
+            case CallFailCause.CHANNEL_NOT_AVAIL:
+            case CallFailCause.QOS_NOT_AVAIL:
+            case CallFailCause.BEARER_NOT_AVAIL:
+                return DisconnectCause.CONGESTION;
 
             case CallFailCause.ACM_LIMIT_EXCEEDED:
                 return DisconnectCause.LIMIT_EXCEEDED;
@@ -621,45 +505,49 @@ public class GsmCdmaConnection extends Connection {
                 int serviceState = phone.getServiceState().getState();
                 UiccCardApplication cardApp = phone.getUiccCardApplication();
                 AppState uiccAppState = (cardApp != null) ? cardApp.getState() :
-                                                            AppState.APPSTATE_UNKNOWN;
+                        AppState.APPSTATE_UNKNOWN;
                 if (serviceState == ServiceState.STATE_POWER_OFF) {
                     return DisconnectCause.POWER_OFF;
-                } else if (serviceState == ServiceState.STATE_OUT_OF_SERVICE
-                        || serviceState == ServiceState.STATE_EMERGENCY_ONLY ) {
-                    return DisconnectCause.OUT_OF_SERVICE;
-                } else {
-                    if (isPhoneTypeGsm()) {
-                        if (uiccAppState != AppState.APPSTATE_READY) {
+                }
+                if (!mIsEmergencyCall) {
+                    // Only send OUT_OF_SERVICE if it is not an emergency call. We can still
+                    // technically be in STATE_OUT_OF_SERVICE or STATE_EMERGENCY_ONLY during
+                    // an emergency call and when it ends, we do not want to mistakenly generate
+                    // an OUT_OF_SERVICE disconnect cause during normal call ending.
+                    if ((serviceState == ServiceState.STATE_OUT_OF_SERVICE
+                            || serviceState == ServiceState.STATE_EMERGENCY_ONLY)) {
+                        return DisconnectCause.OUT_OF_SERVICE;
+                    }
+                    // If we are placing an emergency call and the SIM is currently PIN/PUK
+                    // locked the AppState will always not be equal to APPSTATE_READY.
+                    if (uiccAppState != AppState.APPSTATE_READY) {
+                        if (isPhoneTypeGsm()) {
                             return DisconnectCause.ICC_ERROR;
-                        } else if (causeCode == CallFailCause.ERROR_UNSPECIFIED) {
-                            if (phone.mSST.mRestrictedState.isCsRestricted()) {
-                                return DisconnectCause.CS_RESTRICTED;
-                            } else if (phone.mSST.mRestrictedState.isCsEmergencyRestricted()) {
-                                return DisconnectCause.CS_RESTRICTED_EMERGENCY;
-                            } else if (phone.mSST.mRestrictedState.isCsNormalRestricted()) {
-                                return DisconnectCause.CS_RESTRICTED_NORMAL;
-                            } else {
-                                return DisconnectCause.ERROR_UNSPECIFIED;
+                        } else { // CDMA
+                            if (phone.mCdmaSubscriptionSource ==
+                                    CdmaSubscriptionSourceManager.SUBSCRIPTION_FROM_RUIM) {
+                                return DisconnectCause.ICC_ERROR;
                             }
-                        } else if (causeCode == CallFailCause.NORMAL_CLEARING) {
-                            return DisconnectCause.NORMAL;
-                        } else {
-                            // If nothing else matches, report unknown call drop reason
-                            // to app, not NORMAL call end.
-                            return DisconnectCause.ERROR_UNSPECIFIED;
-                        }
-                    } else {
-                        if (phone.mCdmaSubscriptionSource ==
-                                CdmaSubscriptionSourceManager.SUBSCRIPTION_FROM_RUIM
-                                && uiccAppState != AppState.APPSTATE_READY) {
-                            return DisconnectCause.ICC_ERROR;
-                        } else if (causeCode==CallFailCause.NORMAL_CLEARING) {
-                            return DisconnectCause.NORMAL;
-                        } else {
-                            return DisconnectCause.ERROR_UNSPECIFIED;
                         }
                     }
                 }
+                if (isPhoneTypeGsm()) {
+                    if (causeCode == CallFailCause.ERROR_UNSPECIFIED) {
+                        if (phone.mSST.mRestrictedState.isCsRestricted()) {
+                            return DisconnectCause.CS_RESTRICTED;
+                        } else if (phone.mSST.mRestrictedState.isCsEmergencyRestricted()) {
+                            return DisconnectCause.CS_RESTRICTED_EMERGENCY;
+                        } else if (phone.mSST.mRestrictedState.isCsNormalRestricted()) {
+                            return DisconnectCause.CS_RESTRICTED_NORMAL;
+                        }
+                    }
+                }
+                if (causeCode == CallFailCause.NORMAL_CLEARING) {
+                    return DisconnectCause.NORMAL;
+                }
+                // If nothing else matches, report unknown call drop reason
+                // to app, not NORMAL call end.
+                return DisconnectCause.ERROR_UNSPECIFIED;
         }
     }
 

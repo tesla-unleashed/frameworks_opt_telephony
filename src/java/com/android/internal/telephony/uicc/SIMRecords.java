@@ -539,7 +539,7 @@ public class SIMRecords extends IccRecords {
 
         try {
             if (validEfCfis(mEfCfis)) {
-                // lsb is of byte 1 is voice status
+                // lsb is of byte f1 is voice status
                 if (enable) {
                     mEfCfis[1] |= 1;
                 } else {
@@ -552,7 +552,7 @@ public class SIMRecords extends IccRecords {
                 // Update dialNumber if not empty and CFU is enabled.
                 // Spec reference for EF_CFIS contents, TS 51.011 section 10.3.46.
                 if (enable && !TextUtils.isEmpty(dialNumber)) {
-                    log("EF_CFIS: updating cf number, " + dialNumber);
+                    logv("EF_CFIS: updating cf number, " + Rlog.pii(LOG_TAG, dialNumber));
                     byte[] bcdNumber = PhoneNumberUtils.numberToCalledPartyBCD(dialNumber);
 
                     System.arraycopy(bcdNumber, 0, mEfCfis, CFIS_TON_NPI_OFFSET, bcdNumber.length);
@@ -670,7 +670,7 @@ public class SIMRecords extends IccRecords {
                 }
 
                 log("IMSI: mMncLength=" + mMncLength);
-                log("IMSI: " + mImsi.substring(0, 6) + "xxxxxxx");
+                log("IMSI: " + mImsi.substring(0, 6) + Rlog.pii(LOG_TAG, mImsi.substring(6)));
 
                 if (((mMncLength == UNKNOWN) || (mMncLength == 2)) &&
                         ((mImsi != null) && (mImsi.length() >= 6))) {
@@ -1291,6 +1291,7 @@ public class SIMRecords extends IccRecords {
             case EF_FDN:
                 if (DBG) log("SIM Refresh called for EF_FDN");
                 mParentApp.queryFdn();
+                mAdnCache.reset();
                 break;
             case EF_MSISDN:
                 mRecordsToLoad++;
@@ -1477,6 +1478,31 @@ public class SIMRecords extends IccRecords {
                     carrierName);
         } else {
             setSpnFromConfig(getOperatorNumeric());
+        }
+        setDisplayName();
+    }
+
+    private void setDisplayName() {
+        SubscriptionManager subManager = SubscriptionManager.from(mContext);
+        int[] subId = subManager.getSubId(mParentApp.getPhoneId());
+
+        if ((subId == null) || subId.length <= 0) {
+            log("subId not valid for Phone " + mParentApp.getPhoneId());
+            return;
+        }
+
+        SubscriptionInfo subInfo = subManager.getActiveSubscriptionInfo(subId[0]);
+        if (subInfo != null && subInfo.getNameSource() !=
+                    SubscriptionManager.NAME_SOURCE_USER_INPUT) {
+            CharSequence oldSubName = subInfo.getDisplayName();
+            String newCarrierName = mTelephonyManager.getSimOperatorName(subId[0]);
+
+            if (!TextUtils.isEmpty(newCarrierName) && !newCarrierName.equals(oldSubName)) {
+                log("sim name[" + mParentApp.getPhoneId() + "] = " + newCarrierName);
+                SubscriptionController.getInstance().setDisplayName(newCarrierName, subId[0]);
+            }
+        } else {
+            log("SUB[" + mParentApp.getPhoneId() + "] " + subId[0] + " SubInfo not created yet");
         }
     }
 
@@ -1828,6 +1854,13 @@ public class SIMRecords extends IccRecords {
                 } else {
                     setServiceProviderName(null);
                     if (DBG) log("No SPN loaded in either CHPS or 3GPP");
+                    if (mPnnHomeName != null && mSpn == null) {
+                        if (DBG) log("Falling back to home network name for SPN");
+                        mSpn = mPnnHomeName;
+                        mTelephonyManager.setSimOperatorNameForPhone(
+                                mParentApp.getPhoneId(), mSpn);
+                        mRecordsEventsRegistrants.notifyResult(EVENT_SPN);
+                    }
                 }
 
                 mSpnState = GetSpnFsmState.IDLE;

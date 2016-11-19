@@ -17,6 +17,7 @@
 package com.android.internal.telephony.dataconnection;
 
 import com.android.internal.telephony.CallTracker;
+import com.android.internal.telephony.CarrierSignalAgent;
 import com.android.internal.telephony.CommandException;
 import com.android.internal.telephony.DctConstants;
 import com.android.internal.telephony.Phone;
@@ -408,6 +409,9 @@ public class DataConnection extends StateMachine {
                 networkType, NETWORK_TYPE, TelephonyManager.getNetworkTypeName(networkType));
         mNetworkInfo.setRoaming(ss.getDataRoaming());
         mNetworkInfo.setIsAvailable(true);
+        // The network should be by default metered until we find it has NET_CAPABILITY_NOT_METERED
+        // capability.
+        mNetworkInfo.setMetered(true);
 
         addState(mDefaultState);
             addState(mInactiveState, mDefaultState);
@@ -759,6 +763,11 @@ public class DataConnection extends StateMachine {
 
     private void updateTcpBufferSizes(int rilRat) {
         String sizes = null;
+        if (rilRat == ServiceState.RIL_RADIO_TECHNOLOGY_LTE_CA) {
+            // for now treat CA as LTE.  Plan to surface the extra bandwith in a more
+            // precise manner which should affect buffer sizes
+            rilRat = ServiceState.RIL_RADIO_TECHNOLOGY_LTE;
+        }
         String ratName = ServiceState.rilRadioTechnologyToString(rilRat).toLowerCase(Locale.ROOT);
         // ServiceState gives slightly different names for EVDO tech ("evdo-rev.0" for ex)
         // - patch it up:
@@ -824,6 +833,61 @@ public class DataConnection extends StateMachine {
             }
         }
         mLinkProperties.setTcpBufferSizes(sizes);
+
+        int segments = SystemProperties.getInt("net.tcp.delack." + ratName, 1);
+        mLinkProperties.setTcpDelayedAckSegments(segments);
+        int usercfg = SystemProperties.getInt("net.tcp.usercfg." + ratName, 0);
+        mLinkProperties.setTcpUserCfg(usercfg);
+    }
+
+    /**
+     * Indicates if when this connection was established we had a restricted/privileged
+     * NetworkRequest and needed it to overcome data-enabled limitations.
+     *
+     * This gets set once per connection setup and is based on conditions at that time.
+     * We could theoretically have dynamic capabilities but now is not a good time to
+     * experiement with that.
+     *
+     * This flag overrides the APN-based restriction capability, restricting the network
+     * based on both having a NetworkRequest with restricted AND needing a restricted
+     * bit to overcome user-disabled status.  This allows us to handle the common case
+     * of having both restricted requests and unrestricted requests for the same apn:
+     * if conditions require a restricted network to overcome user-disabled then it must
+     * be restricted, otherwise it is unrestricted (or restricted based on APN type).
+     *
+     * Because we're not supporting dynamic capabilities, if conditions change and we go from
+     * data-enabled to not or vice-versa we will need to tear down networks to deal with it
+     * at connection setup time with the new state.
+     *
+     * This supports a privileged app bringing up a network without general apps having access
+     * to it when the network is otherwise unavailable (hipri).  The first use case is
+     * pre-paid SIM reprovisioning over internet, where the carrier insists on no traffic
+     * other than from the privileged carrier-app.
+     */
+    private boolean mRestrictedNetworkOverride = false;
+
+    // Should be called once when the call goes active to examine the state of things and
+    // declare the restriction override for the life of the connection
+    private void setNetworkRestriction() {
+        mRestrictedNetworkOverride = false;
+        // first, if we have no restricted requests, this override can stay FALSE:
+        boolean noRestrictedRequests = true;
+        for (ApnContext apnContext : mApnContexts.keySet()) {
+            noRestrictedRequests &= apnContext.hasNoRestrictedRequests(true /* exclude DUN */);
+        }
+        if (noRestrictedRequests) {
+            return;
+        }
+
+        // Do we need a restricted network to satisfy the request?
+        // Is this network metered?  If not, then don't add restricted
+        if (!mApnSetting.isMetered(mPhone.getContext(), mPhone.getSubId(),
+                mPhone.getServiceState().getDataRoaming())) {
+            return;
+        }
+
+        // Is data disabled?
+        mRestrictedNetworkOverride = (mDct.isDataEnabled(true) == false);
     }
 
     private NetworkCapabilities makeNetworkCapabilities() {
@@ -891,10 +955,20 @@ public class DataConnection extends StateMachine {
             if (!mApnSetting.isMetered(mPhone.getContext(), mPhone.getSubId(),
                     mPhone.getServiceState().getDataRoaming())) {
                 result.addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED);
+                mNetworkInfo.setMetered(false);
+            } else {
+                result.removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED);
+                mNetworkInfo.setMetered(true);
             }
 
             result.maybeMarkCapabilitiesRestricted();
         }
+        if (mRestrictedNetworkOverride) {
+            result.removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED);
+            // don't use dun on restriction-overriden networks.
+            result.removeCapability(NetworkCapabilities.NET_CAPABILITY_DUN);
+        }
+
         int up = 14;
         int down = 14;
         switch (mRilRat) {
@@ -1480,6 +1554,10 @@ public class DataConnection extends StateMachine {
     }
     private DcActivatingState mActivatingState = new DcActivatingState();
 
+    public final boolean hasMessages(int what, Object object) {
+        return DataConnection.this.getHandler().hasMessages(what, object);
+    }
+
     /**
      * The state machine is connected, expecting an EVENT_DISCONNECT.
      */
@@ -1489,10 +1567,12 @@ public class DataConnection extends StateMachine {
 
             boolean createNetworkAgent = true;
             // If a disconnect is already pending, avoid notifying all of connected
-            if (hasMessages(EVENT_DISCONNECT) ||
-                    hasMessages(EVENT_DISCONNECT_ALL) ||
-                    hasDeferredMessages(EVENT_DISCONNECT) ||
-                    hasDeferredMessages(EVENT_DISCONNECT_ALL)) {
+            if (hasMessages(EVENT_DISCONNECT, mConnectionParams.mOnCompletedMsg.obj) ||
+                    hasMessages(EVENT_DISCONNECT_ALL, mConnectionParams.
+                    mOnCompletedMsg.obj) || hasDeferredMessages(EVENT_DISCONNECT,
+                    mConnectionParams.mOnCompletedMsg.obj) ||
+                    hasDeferredMessages(EVENT_DISCONNECT_ALL, mConnectionParams.
+                    mOnCompletedMsg.obj)) {
                 log("DcActiveState: skipping notifyAllOfConnected()");
                 createNetworkAgent = false;
             } else {
@@ -1515,9 +1595,15 @@ public class DataConnection extends StateMachine {
             updateTcpBufferSizes(mRilRat);
 
             final NetworkMisc misc = new NetworkMisc();
+            final CarrierSignalAgent carrierSignalAgent = mPhone.getCarrierSignalAgent();
+            if(carrierSignalAgent.hasRegisteredCarrierSignalReceivers()) {
+                // carrierSignal Receivers will place the carrier-specific provisioning notification
+                misc.provisioningNotificationDisabled = true;
+            }
             misc.subscriberId = mPhone.getSubscriberId();
 
             if (createNetworkAgent) {
+                setNetworkRestriction();
                 mNetworkAgent = new DcNetworkAgent(getHandler().getLooper(), mPhone.getContext(),
                         "DcNetworkAgent", mNetworkInfo, makeNetworkCapabilities(), mLinkProperties,
                         50, misc);
@@ -1813,7 +1899,6 @@ public class DataConnection extends StateMachine {
                    and let DcTracker to make the decision */
                 Message msg = mDct.obtainMessage(DctConstants.EVENT_REDIRECTION_DETECTED,
                         redirectUrl);
-                AsyncResult.forMessage(msg, mApnContexts, null);
                 msg.sendToTarget();
             }
         }
@@ -1995,7 +2080,8 @@ public class DataConnection extends StateMachine {
                 + " mLastFailCause=" + mLastFailCause
                 + " mTag=" + mTag
                 + " mLinkProperties=" + mLinkProperties
-                + " linkCapabilities=" + makeNetworkCapabilities();
+                + " linkCapabilities=" + makeNetworkCapabilities()
+                + " mRestrictedNetworkOverride=" + mRestrictedNetworkOverride;
     }
 
     @Override

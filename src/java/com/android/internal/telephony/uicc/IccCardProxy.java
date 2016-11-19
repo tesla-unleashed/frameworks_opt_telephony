@@ -227,11 +227,21 @@ public class IccCardProxy extends Handler implements IccCard {
                 }
                 break;
             case EVENT_ICC_CHANGED:
+                // For CDMA Nv device, should not handle Icc change since no SIM card.
+                if (mQuietMode) {
+                    log("QuietMode: ignore ICC changed ");
+                    return;
+                }
                 if (mInitialized) {
                     updateIccAvailability();
                 }
                 break;
             case EVENT_ICC_ABSENT:
+                // For CDMA Nv device, should not handle Icc absent since no SIM Card.
+                if (mQuietMode) {
+                    log("QuietMode: ignore SIM absent ");
+                    return;
+                }
                 mAbsentRegistrants.notifyRegistrants();
                 setExternalState(State.ABSENT);
                 break;
@@ -389,6 +399,11 @@ public class IccCardProxy extends Handler implements IccCard {
 
         if (mUiccCard.getCardState() == CardState.CARDSTATE_ERROR) {
             setExternalState(State.CARD_IO_ERROR);
+            return;
+        }
+
+        if (mUiccCard.getCardState() == CardState.CARDSTATE_RESTRICTED) {
+            setExternalState(State.CARD_RESTRICTED);
             return;
         }
 
@@ -589,6 +604,7 @@ public class IccCardProxy extends Handler implements IccCard {
             case NOT_READY: return IccCardConstants.INTENT_VALUE_ICC_NOT_READY;
             case PERM_DISABLED: return IccCardConstants.INTENT_VALUE_ICC_LOCKED;
             case CARD_IO_ERROR: return IccCardConstants.INTENT_VALUE_ICC_CARD_IO_ERROR;
+            case CARD_RESTRICTED: return IccCardConstants.INTENT_VALUE_ICC_CARD_RESTRICTED;
             default: return IccCardConstants.INTENT_VALUE_ICC_UNKNOWN;
         }
     }
@@ -604,6 +620,7 @@ public class IccCardProxy extends Handler implements IccCard {
             case NETWORK_LOCKED: return IccCardConstants.INTENT_VALUE_LOCKED_NETWORK;
             case PERM_DISABLED: return IccCardConstants.INTENT_VALUE_ABSENT_ON_PERM_DISABLED;
             case CARD_IO_ERROR: return IccCardConstants.INTENT_VALUE_ICC_CARD_IO_ERROR;
+            case CARD_RESTRICTED: return IccCardConstants.INTENT_VALUE_ICC_CARD_RESTRICTED;
             default: return null;
        }
     }

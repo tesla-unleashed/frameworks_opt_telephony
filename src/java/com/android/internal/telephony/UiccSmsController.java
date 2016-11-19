@@ -144,11 +144,11 @@ public class UiccSmsController extends ISms.Stub {
 
     public void sendTextForSubscriberWithSelfPermissions(int subId, String callingPackage,
             String destAddr, String scAddr, String text, PendingIntent sentIntent,
-            PendingIntent deliveryIntent) {
+            PendingIntent deliveryIntent, boolean persistMessage) {
         IccSmsInterfaceManager iccSmsIntMgr = getIccSmsInterfaceManager(subId);
         if (iccSmsIntMgr != null) {
             iccSmsIntMgr.sendTextWithSelfPermissions(callingPackage, destAddr, scAddr, text,
-                    sentIntent, deliveryIntent);
+                    sentIntent, deliveryIntent, persistMessage);
         } else {
             Rlog.e(LOG_TAG,"sendText iccSmsIntMgr is null for" +
                           " Subscription: " + subId);
@@ -292,6 +292,14 @@ public class UiccSmsController extends ISms.Stub {
     @Override
     public boolean isSmsSimPickActivityNeeded(int subId) {
         final Context context = ActivityThread.currentApplication().getApplicationContext();
+
+        boolean canCurrentAppHandleAlwaysAsk = SmsApplication.canSmsAppHandleAlwaysAsk(context);
+        if (!isSMSPromptEnabled() && canCurrentAppHandleAlwaysAsk) {
+            Rlog.d(LOG_TAG, "isSmsSimPickActivityNeeded: false, sms prompt disabled.");
+            // user knows best
+            return false;
+        }
+
         TelephonyManager telephonyManager =
                 (TelephonyManager) context.getSystemService(Context.TELEPHONY_SERVICE);
         List<SubscriptionInfo> subInfoList;
@@ -319,7 +327,7 @@ public class UiccSmsController extends ISms.Stub {
             }
         }
 
-        return false;
+        return !canCurrentAppHandleAlwaysAsk;
     }
 
     @Override

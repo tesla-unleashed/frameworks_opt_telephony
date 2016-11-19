@@ -23,6 +23,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.ActivityInfo;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.PackageManager.NameNotFoundException;
@@ -40,6 +41,7 @@ import android.provider.Telephony.Sms.Intents;
 import android.telephony.Rlog;
 import android.telephony.SmsManager;
 import android.telephony.TelephonyManager;
+import android.text.TextUtils;
 import android.util.Log;
 
 import com.android.internal.content.PackageMonitor;
@@ -61,6 +63,7 @@ public final class SmsApplication {
     private static final String BLUETOOTH_PACKAGE_NAME = "com.android.bluetooth";
     private static final String MMS_SERVICE_PACKAGE_NAME = "com.android.mms.service";
     private static final String TELEPHONY_PROVIDER_PACKAGE_NAME = "com.android.providers.telephony";
+    private static final String DEFAULT_SYSTEM_MMS_PACKAGE_NAME = "com.android.messaging";
 
     private static final String SCHEME_SMS = "sms";
     private static final String SCHEME_SMSTO = "smsto";
@@ -74,7 +77,7 @@ public final class SmsApplication {
         /**
          * Name of this SMS app for display.
          */
-        public String mApplicationName;
+        private String mApplicationName;
 
         /**
          * Package name for this SMS app.
@@ -125,16 +128,32 @@ public final class SmsApplication {
                     && mRespondViaMessageClass != null && mSendToClass != null);
         }
 
-        public SmsApplicationData(String applicationName, String packageName, int uid) {
-            mApplicationName = applicationName;
+        public SmsApplicationData(String packageName, int uid) {
             mPackageName = packageName;
             mUid = uid;
         }
 
+        public String getApplicationName(Context context) {
+            if (mApplicationName == null) {
+                PackageManager pm = context.getPackageManager();
+                ApplicationInfo appInfo;
+                try {
+                    appInfo = pm.getApplicationInfoAsUser(mPackageName, 0,
+                            UserHandle.getUserId(mUid));
+                } catch (NameNotFoundException e) {
+                    return null;
+                }
+                if (appInfo != null) {
+                    CharSequence label  = pm.getApplicationLabel(appInfo);
+                    mApplicationName = (label == null) ? null : label.toString();
+                }
+            }
+            return mApplicationName;
+        }
+
         @Override
         public String toString() {
-            return "mApplicationName: " + mApplicationName +
-                    " mPackageName: " + mPackageName +
+            return " mPackageName: " + mPackageName +
                     " mSmsReceiverClass: " + mSmsReceiverClass +
                     " mMmsReceiverClass: " + mMmsReceiverClass +
                     " mRespondViaMessageClass: " + mRespondViaMessageClass +
@@ -217,9 +236,8 @@ public final class SmsApplication {
             }
             final String packageName = activityInfo.packageName;
             if (!receivers.containsKey(packageName)) {
-                final String applicationName = resolveInfo.loadLabel(packageManager).toString();
-                final SmsApplicationData smsApplicationData = new SmsApplicationData(
-                        applicationName, packageName, activityInfo.applicationInfo.uid);
+                final SmsApplicationData smsApplicationData = new SmsApplicationData(packageName,
+                        activityInfo.applicationInfo.uid);
                 smsApplicationData.mSmsReceiverClass = activityInfo.name;
                 receivers.put(packageName, smsApplicationData);
             }
@@ -896,6 +914,16 @@ public final class SmsApplication {
             return true;
         }
         return false;
+    }
+
+    /**
+     * @hide
+     */
+    public static boolean canSmsAppHandleAlwaysAsk(Context context) {
+        final ComponentName defaultMmsApplication = SmsApplication.getDefaultMmsApplication(context,
+                false);
+        return TextUtils.equals(DEFAULT_SYSTEM_MMS_PACKAGE_NAME,
+                defaultMmsApplication.getPackageName());
     }
 
     private static String getDefaultSmsApplicationPackageName(Context context) {

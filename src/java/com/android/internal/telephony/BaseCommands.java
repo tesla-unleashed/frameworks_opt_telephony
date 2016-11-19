@@ -76,6 +76,8 @@ public abstract class BaseCommands implements CommandsInterface {
             new RegistrantList();
     protected RegistrantList mAdnInitDoneRegistrants = new RegistrantList();
     protected RegistrantList mAdnRecordsInfoRegistrants = new RegistrantList();
+    protected RegistrantList mPcoDataRegistrants = new RegistrantList();
+
 
     protected Registrant mGsmSmsRegistrant;
     protected Registrant mCdmaSmsRegistrant;
@@ -89,6 +91,7 @@ public abstract class BaseCommands implements CommandsInterface {
     protected Registrant mCatProCmdRegistrant;
     protected Registrant mCatEventRegistrant;
     protected Registrant mCatCallSetUpRegistrant;
+    protected Registrant mCatSendSmsResultRegistrant;
     protected Registrant mIccSmsFullRegistrant;
     protected Registrant mEmergencyCallbackModeRegistrant;
     protected Registrant mRingRegistrant;
@@ -450,6 +453,15 @@ public abstract class BaseCommands implements CommandsInterface {
             mCatCallSetUpRegistrant.clear();
             mCatCallSetUpRegistrant = null;
         }
+    }
+
+    // For Samsung STK
+    public void setOnCatSendSmsResult(Handler h, int what, Object obj) {
+        mCatSendSmsResultRegistrant = new Registrant(h, what, obj);
+    }
+
+    public void unSetOnCatSendSmsResult(Handler h) {
+        mCatSendSmsResultRegistrant.clear();
     }
 
     @Override
@@ -852,8 +864,7 @@ public abstract class BaseCommands implements CommandsInterface {
         return mRilVersion;
     }
 
-    public void setUiccSubscription(int slotId, int appIndex, int subId, int subStatus,
-            Message response) {
+    public void setUiccSubscription(int appIndex, boolean activate, Message response) {
     }
 
     public void setDataAllowed(boolean allowed, Message response) {
@@ -965,4 +976,13 @@ public abstract class BaseCommands implements CommandsInterface {
     public void updateAdnRecord(SimPhoneBookAdnRecord adnRecordInfo, Message result) {
     }
 
+    @Override
+    public void registerForPcoData(Handler h, int what, Object obj) {
+        mPcoDataRegistrants.add(new Registrant(h, what, obj));
+    }
+
+    @Override
+    public void unregisterForPcoData(Handler h) {
+        mPcoDataRegistrants.remove(h);
+    }
 }

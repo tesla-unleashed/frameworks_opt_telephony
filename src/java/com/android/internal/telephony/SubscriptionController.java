@@ -263,36 +263,45 @@ public class SubscriptionController extends ISub.Stub {
      * @return the query result of desired SubInfoRecord
      */
     private SubscriptionInfo getSubInfoRecord(Cursor cursor) {
-        int id = cursor.getInt(cursor.getColumnIndexOrThrow(
-                SubscriptionManager.UNIQUE_KEY_SUBSCRIPTION_ID));
-        String iccId = cursor.getString(cursor.getColumnIndexOrThrow(
-                SubscriptionManager.ICC_ID));
-        int simSlotIndex = cursor.getInt(cursor.getColumnIndexOrThrow(
-                SubscriptionManager.SIM_SLOT_INDEX));
-        String displayName = cursor.getString(cursor.getColumnIndexOrThrow(
-                SubscriptionManager.DISPLAY_NAME));
-        String carrierName = cursor.getString(cursor.getColumnIndexOrThrow(
-                SubscriptionManager.CARRIER_NAME));
-        int nameSource = cursor.getInt(cursor.getColumnIndexOrThrow(
-                SubscriptionManager.NAME_SOURCE));
-        int iconTint = cursor.getInt(cursor.getColumnIndexOrThrow(
-                SubscriptionManager.COLOR));
-        String number = cursor.getString(cursor.getColumnIndexOrThrow(
-                SubscriptionManager.NUMBER));
-        int dataRoaming = cursor.getInt(cursor.getColumnIndexOrThrow(
-                SubscriptionManager.DATA_ROAMING));
-        // Get the blank bitmap for this SubInfoRecord
-        Bitmap iconBitmap = BitmapFactory.decodeResource(mContext.getResources(),
-                com.android.internal.R.drawable.ic_sim_card_multi_24px_clr);
-        int mcc = cursor.getInt(cursor.getColumnIndexOrThrow(
-                SubscriptionManager.MCC));
-        int mnc = cursor.getInt(cursor.getColumnIndexOrThrow(
-                SubscriptionManager.MNC));
-        // FIXME: consider stick this into database too
-        String countryIso = getSubscriptionCountryIso(id);
+            int id, simSlotIndex, nameSource, iconTint, dataRoaming, mcc, mnc, userNwMode;
+            String iccId, displayName, carrierName, number, countryIso;
+            Bitmap iconBitmap;
 
-        int simProvisioningStatus = cursor.getInt(cursor.getColumnIndexOrThrow(
-                SubscriptionManager.SIM_PROVISIONING_STATUS));
+        try {
+            id = cursor.getInt(cursor.getColumnIndexOrThrow(
+                    SubscriptionManager.UNIQUE_KEY_SUBSCRIPTION_ID));
+            iccId = cursor.getString(cursor.getColumnIndexOrThrow(
+                    SubscriptionManager.ICC_ID));
+            simSlotIndex = cursor.getInt(cursor.getColumnIndexOrThrow(
+                    SubscriptionManager.SIM_SLOT_INDEX));
+            displayName = cursor.getString(cursor.getColumnIndexOrThrow(
+                    SubscriptionManager.DISPLAY_NAME));
+            carrierName = cursor.getString(cursor.getColumnIndexOrThrow(
+                    SubscriptionManager.CARRIER_NAME));
+            nameSource = cursor.getInt(cursor.getColumnIndexOrThrow(
+                    SubscriptionManager.NAME_SOURCE));
+            iconTint = cursor.getInt(cursor.getColumnIndexOrThrow(
+                    SubscriptionManager.COLOR));
+            number = cursor.getString(cursor.getColumnIndexOrThrow(
+                    SubscriptionManager.NUMBER));
+            dataRoaming = cursor.getInt(cursor.getColumnIndexOrThrow(
+                    SubscriptionManager.DATA_ROAMING));
+            // Get the blank bitmap for this SubInfoRecord
+            iconBitmap = BitmapFactory.decodeResource(mContext.getResources(),
+                    com.android.internal.R.drawable.ic_sim_card_multi_24px_clr);
+            mcc = cursor.getInt(cursor.getColumnIndexOrThrow(
+                    SubscriptionManager.MCC));
+            mnc = cursor.getInt(cursor.getColumnIndexOrThrow(
+                    SubscriptionManager.MNC));
+            // FIXME: consider stick this into database too
+            countryIso = getSubscriptionCountryIso(id);
+
+            userNwMode = cursor.getInt(cursor.getColumnIndexOrThrow(
+                    SubscriptionManager.USER_NETWORK_MODE));
+        } catch (IllegalArgumentException e) {
+            loge("[getSubInfoRecord] failed getting details for SubInfoRecord: " + e);
+            return null;
+        }
 
         if (VDBG) {
             String iccIdToPrint = SubscriptionInfo.givePrintableIccid(iccId);
@@ -300,7 +309,7 @@ public class SubscriptionController extends ISub.Stub {
                     + simSlotIndex + " displayName:" + displayName + " nameSource:" + nameSource
                     + " iconTint:" + iconTint + " dataRoaming:" + dataRoaming
                     + " mcc:" + mcc + " mnc:" + mnc + " countIso:" + countryIso
-                    + " simProvisioningStatus:" + simProvisioningStatus);
+                    + " userNwMode:" + userNwMode);
         }
 
         // If line1number has been set to a different number, use it instead.
@@ -309,8 +318,8 @@ public class SubscriptionController extends ISub.Stub {
             number = line1Number;
         }
         return new SubscriptionInfo(id, iccId, simSlotIndex, displayName, carrierName,
-                nameSource, iconTint, number, dataRoaming, iconBitmap, mcc, mnc, countryIso,
-                simProvisioningStatus);
+                nameSource, iconTint, number, dataRoaming, iconBitmap, mcc, mnc,
+                countryIso, userNwMode);
     }
 
     /**
@@ -779,6 +788,19 @@ public class SubscriptionController extends ISub.Stub {
                                 setDefaultSmsSubId(subId);
                                 setDefaultVoiceSubId(subId);
                             }
+
+                            // FIXME: Workaround the scenario where default sms subid is not
+                            // being set externally
+                            // CYNGNOS-2185
+                            int phoneId = SubscriptionController.getInstance().getPhoneId(
+                                    getDefaultSmsSubId());
+                            if (phoneId < 0 || phoneId >= TelephonyManager.getDefault()
+                                    .getPhoneCount()) {
+                                Rlog.i(LOG_TAG, "Subscription is invalid. Set default to " + subId);
+                                setDefaultSmsSubId(subId);
+                                PhoneFactory.setSMSPromptEnabled(subIdCountMax > 1);
+                            }
+
                         } else {
                             if (DBG) {
                                 logdl("[addSubInfoRecord] currentSubId != null"
@@ -826,6 +848,10 @@ public class SubscriptionController extends ISub.Stub {
             sPhones[slotId].updateDataConnectionTracker();
 
             if (DBG) logdl("[addSubInfoRecord]- info size=" + sSlotIdxToSubId.size());
+
+            if (PhoneFactory.getSubscriptionInfoUpdater().getInsertedSimCount() <= 1) {
+                PhoneFactory.setSMSPromptEnabled(false);
+            }
 
         } finally {
             Binder.restoreCallingIdentity(identity);
@@ -892,18 +918,22 @@ public class SubscriptionController extends ISub.Stub {
 
         // Now that all security checks passes, perform the operation as ourselves.
         final long identity = Binder.clearCallingIdentity();
+        int result = -1;
         try {
             ContentValues value = new ContentValues(1);
             value.put(SubscriptionManager.CARRIER_NAME, text);
 
-            int result = mContext.getContentResolver().update(SubscriptionManager.CONTENT_URI,
+            result = mContext.getContentResolver().update(SubscriptionManager.CONTENT_URI,
                     value, SubscriptionManager.UNIQUE_KEY_SUBSCRIPTION_ID + "=" +
                     Long.toString(subId), null);
             notifySubscriptionInfoChanged();
 
             return result;
+        } catch (android.database.sqlite.SQLiteDiskIOException e) {
+            e.printStackTrace();
         } finally {
             Binder.restoreCallingIdentity(identity);
+            return result;
         }
     }
 
@@ -1098,47 +1128,6 @@ public class SubscriptionController extends ISub.Stub {
         notifySubscriptionInfoChanged();
 
         return result;
-    }
-
-    /**
-     * Set SimProvisioning Status by subscription ID
-     * @param provisioningStatus with the subscription:
-     * {@See SubscriptionManager#SIM_PROVISIONED}
-     * {@See SubscriptionManager#SIM_UNPROVISIONED_COLD}
-     * {@See SubscriptionManager#SIM_UNPROVISIONED_OUT_OF_CREDIT}
-     * @param subId the unique SubInfoRecord index in database
-     * @return the number of records updated
-     */
-    @Override
-    public int setSimProvisioningStatus(int provisioningStatus, int subId) {
-
-        if (DBG) {
-            logd("[setSimProvisioningStatus]+ provisioningStatus:" + provisioningStatus + " subId:"
-                    + subId);
-        }
-
-        enforceModifyPhoneState("setSimProvisioningStatus");
-        // Now that all security checks passes, perform the operation as ourselves.
-        final long identity = Binder.clearCallingIdentity();
-        try {
-            validateSubId(subId);
-            if (provisioningStatus < 0 || provisioningStatus >
-                    SubscriptionManager.MAX_SIM_PROVISIONING_STATUS) {
-                logd("[setSimProvisioningStatus]- fail with wrong provisioningStatus");
-                return -1;
-            }
-            ContentValues value = new ContentValues(1);
-            value.put(SubscriptionManager.SIM_PROVISIONING_STATUS, provisioningStatus);
-
-            int result = mContext.getContentResolver().update(SubscriptionManager.CONTENT_URI,
-                    value, SubscriptionManager.UNIQUE_KEY_SUBSCRIPTION_ID + "=" +
-                            Long.toString(subId), null);
-            notifySubscriptionInfoChanged();
-
-            return result;
-        } finally {
-            Binder.restoreCallingIdentity(identity);
-        }
     }
 
     @Override

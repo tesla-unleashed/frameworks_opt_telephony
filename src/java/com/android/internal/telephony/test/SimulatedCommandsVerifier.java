@@ -18,6 +18,7 @@ package com.android.internal.telephony.test;
 
 import android.os.Handler;
 import android.os.Message;
+import android.service.carrier.CarrierIdentifier;
 
 import com.android.internal.telephony.CommandsInterface;
 import com.android.internal.telephony.RadioCapability;
@@ -26,6 +27,8 @@ import com.android.internal.telephony.cdma.CdmaSmsBroadcastConfigInfo;
 import com.android.internal.telephony.dataconnection.DataProfile;
 import com.android.internal.telephony.gsm.SmsBroadcastConfigInfo;
 import com.android.internal.telephony.uicc.SimPhoneBookAdnRecord;
+
+import java.util.List;
 
 public class SimulatedCommandsVerifier implements CommandsInterface {
     private static SimulatedCommandsVerifier sInstance;
@@ -1292,8 +1295,7 @@ public class SimulatedCommandsVerifier implements CommandsInterface {
     }
 
     @Override
-    public void setUiccSubscription(int slotId, int appIndex, int subId, int subStatus,
-                                    Message result) {
+    public void setUiccSubscription(int appIndex, boolean activate, Message result) {
 
     }
 
@@ -1363,7 +1365,17 @@ public class SimulatedCommandsVerifier implements CommandsInterface {
     }
 
     @Override
+    public void setAllowedCarriers(List<CarrierIdentifier> carriers, Message result) {
+
+    }
+
+    @Override
     public void getAtr(Message response) {
+
+    }
+
+    @Override
+    public void getAllowedCarriers(Message result) {
 
     }
 
@@ -1395,4 +1407,21 @@ public class SimulatedCommandsVerifier implements CommandsInterface {
 
     }
 
+    @Override
+    public void registerForPcoData(Handler h, int what, Object obj) {
+    }
+
+    @Override
+    public void unregisterForPcoData(Handler h) {
+    }
+
+    @Override
+    public void unSetOnCatSendSmsResult(Handler h) { // Samsung STK
+
+    }
+
+    @Override
+    public void setOnCatSendSmsResult(Handler h, int what, Object obj) { // Samsung STK
+
+    }
 }
