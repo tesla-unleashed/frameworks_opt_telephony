@@ -77,6 +77,7 @@ public class SubscriptionInfoUpdater extends Handler {
     private static final int EVENT_SIM_RESTRICTED = 8;
 
     private static final String ICCID_STRING_FOR_NO_SIM = "";
+    private static final String ICCID_STRING_FOR_NV = "DUMMY_NV_ID";
     /**
      *  int[] sInsertSimState maintains all slots' SIM inserted status currently,
      *  it may contain 4 kinds of values:
@@ -115,6 +116,8 @@ public class SubscriptionInfoUpdater extends Handler {
     // The current foreground user ID.
     private int mCurrentlyActiveUserId;
     private CarrierServiceBindHelper mCarrierServiceBindHelper;
+    private boolean mIsShutdown;
+    private int mCurrentSimCount;
 
     public SubscriptionInfoUpdater(Context context, Phone[] phone, CommandsInterface[] ci) {
         logd("Constructor invoked");
@@ -124,10 +127,12 @@ public class SubscriptionInfoUpdater extends Handler {
         mSubscriptionManager = SubscriptionManager.from(mContext);
         mPackageManager = IPackageManager.Stub.asInterface(ServiceManager.getService("package"));
         mUserManager = (UserManager) mContext.getSystemService(Context.USER_SERVICE);
+        mIsShutdown = false;
 
         IntentFilter intentFilter = new IntentFilter(TelephonyIntents.ACTION_SIM_STATE_CHANGED);
         intentFilter.addAction(IccCardProxy.ACTION_INTERNAL_SIM_STATE_CHANGED);
         intentFilter.addAction(Intent.ACTION_USER_UNLOCKED);
+        intentFilter.addAction(Intent.ACTION_SHUTDOWN);
         mContext.registerReceiver(sReceiver, intentFilter);
 
         mCarrierServiceBindHelper = new CarrierServiceBindHelper(mContext);
@@ -198,6 +203,11 @@ public class SubscriptionInfoUpdater extends Handler {
                             UserHandle.USER_ALL);
                 }
                 logd("[Receiver]-");
+                return;
+            }
+
+            if (action.equals(Intent.ACTION_SHUTDOWN)) {
+                mIsShutdown = true;
                 return;
             }
 
@@ -528,6 +538,16 @@ public class SubscriptionInfoUpdater extends Handler {
         updateCarrierServices(slotId, simState);
     }
 
+    public void updateSubIdForNV(int slotId) {
+        mIccId[slotId] = ICCID_STRING_FOR_NV;
+        logd("[updateSubIdForNV]+ Start");
+        if (isAllIccIdQueryDone()) {
+            logd("[updateSubIdForNV]+ updating");
+            updateSubscriptionInfoByIccId();
+        }
+        updateCarrierServices(slotId, IccCardConstants.INTENT_VALUE_ICC_LOADED);
+    }
+
     /**
      * TODO: Simplify more, as no one is interested in what happened
      * only what the current list contains.
@@ -666,12 +686,26 @@ public class SubscriptionInfoUpdater extends Handler {
             }
         }
 
-        // Ensure the modems are mapped correctly
-        mSubscriptionManager.setDefaultDataSubId(
-                mSubscriptionManager.getDefaultDataSubscriptionId());
+        mCurrentSimCount = insertedSimCount;
+
+        if (!mIsShutdown && insertedSimCount == 1) {
+            SubscriptionInfo sir = subInfos.get(0);
+            int subId = sir.getSubscriptionId();
+            mSubscriptionManager.setDefaultDataSubId(subId);
+            mSubscriptionManager.setDefaultVoiceSubId(subId);
+            mSubscriptionManager.setDefaultSmsSubId(subId);
+        } else {
+            // Ensure the modems are mapped correctly
+            mSubscriptionManager.setDefaultDataSubId(
+                    mSubscriptionManager.getDefaultDataSubscriptionId());
+        }
 
         SubscriptionController.getInstance().notifySubscriptionInfoChanged();
         logd("updateSubscriptionInfoByIccId:- SsubscriptionInfo update complete");
+    }
+
+    protected int getInsertedSimCount() {
+        return mCurrentSimCount;
     }
 
     private boolean isNewSim(String iccId, String[] oldIccId) {

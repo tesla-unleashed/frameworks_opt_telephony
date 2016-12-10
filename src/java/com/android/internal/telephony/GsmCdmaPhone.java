@@ -142,6 +142,7 @@ public class GsmCdmaPhone extends Phone {
     };
     public static final String PROPERTY_CDMA_HOME_OPERATOR_NUMERIC =
             "ro.cdma.home.operator.numeric";
+    private static final String DUMMY_NV_ICC_SERIAL = "DUMMY_NV_ICC_SERIAL";
 
     //CDMALTE
     /** PHONE_TYPE_CDMA_LTE in addition to RuimRecords needs access to SIMRecords and
@@ -186,8 +187,6 @@ public class GsmCdmaPhone extends Phone {
 
     private int mRilVersion;
     private boolean mBroadcastEmergencyCallStateChanges = false;
-    // flag to indicate if emergency call end broadcast should be sent
-    boolean mSendEmergencyCallEnd = true;
 
     // Constructors
 
@@ -281,7 +280,7 @@ public class GsmCdmaPhone extends Phone {
             tm.setPhoneType(getPhoneId(), PhoneConstants.PHONE_TYPE_GSM);
             mIccCardProxy.setVoiceRadioTech(ServiceState.RIL_RADIO_TECHNOLOGY_UMTS);
         } else {
-            mCdmaSubscriptionSource = mCdmaSSM.getCdmaSubscriptionSource();
+            handleCdmaSubscriptionSource(mCdmaSSM.getCdmaSubscriptionSource());
             // This is needed to handle phone process crashes
             String inEcm = SystemProperties.get(TelephonyProperties.PROPERTY_INECM_MODE, "false");
             mIsPhoneInEcmState = inEcm.equals("true");
@@ -640,24 +639,11 @@ public class GsmCdmaPhone extends Phone {
     @Override
     public void sendEmergencyCallStateChange(boolean callActive) {
         if (mBroadcastEmergencyCallStateChanges) {
-            if (callActive &&
-                    getServiceState().getRilDataRadioTechnology() == ServiceState.RIL_RADIO_TECHNOLOGY_IWLAN) {
-                // if emergency call is started while on iwlan, do not send the start or end
-                // broadcast
-                mSendEmergencyCallEnd = false;
-                if (DBG) Rlog.d(LOG_TAG, "sendEmergencyCallStateChange: not sending call start " +
-                        "intent as voice tech is IWLAN");
-            } else if (callActive || mSendEmergencyCallEnd) {
-                Intent intent = new Intent(TelephonyIntents.ACTION_EMERGENCY_CALL_STATE_CHANGED);
-                intent.putExtra(PhoneConstants.PHONE_IN_EMERGENCY_CALL, callActive);
-                SubscriptionManager.putPhoneIdAndSubIdExtra(intent, getPhoneId());
-                ActivityManagerNative.broadcastStickyIntent(intent, null, UserHandle.USER_ALL);
-                if (DBG) Rlog.d(LOG_TAG, "sendEmergencyCallStateChange");
-            } else {
-                if (DBG) Rlog.d(LOG_TAG, "sendEmergencyCallStateChange: not sending call end " +
-                        "intent as start was not sent");
-                mSendEmergencyCallEnd = true;
-            }
+            Intent intent = new Intent(TelephonyIntents.ACTION_EMERGENCY_CALL_STATE_CHANGED);
+            intent.putExtra(PhoneConstants.PHONE_IN_EMERGENCY_CALL, callActive);
+            SubscriptionManager.putPhoneIdAndSubIdExtra(intent, getPhoneId());
+            ActivityManagerNative.broadcastStickyIntent(intent, null, UserHandle.USER_ALL);
+            if (DBG) Rlog.d(LOG_TAG, "sendEmergencyCallStateChange: callActive " + callActive);
         }
     }
 
@@ -744,6 +730,9 @@ public class GsmCdmaPhone extends Phone {
 
     @Override
     public String getIccSerialNumber() {
+        if (mCdmaSubscriptionSource == CDMA_SUBSCRIPTION_NV) {
+            return DUMMY_NV_ICC_SERIAL;
+        }
         IccRecords r = mIccRecords.get();
         if (!isPhoneTypeGsm() && r == null) {
             // to get ICCID form SIMRecords because it is on MF.
@@ -754,6 +743,9 @@ public class GsmCdmaPhone extends Phone {
 
     @Override
     public String getFullIccSerialNumber() {
+        if (mCdmaSubscriptionSource == CDMA_SUBSCRIPTION_NV) {
+            return DUMMY_NV_ICC_SERIAL;
+        }
         IccRecords r = mIccRecords.get();
         if (!isPhoneTypeGsm() && r == null) {
             // to get ICCID form SIMRecords because it is on MF.
@@ -2014,7 +2006,7 @@ public class GsmCdmaPhone extends Phone {
         mCi.getVoiceRadioTechnology(obtainMessage(EVENT_REQUEST_VOICE_RADIO_TECH_DONE));
 
         if (!isPhoneTypeGsm()) {
-            mCdmaSubscriptionSource = mCdmaSSM.getCdmaSubscriptionSource();
+            handleCdmaSubscriptionSource(mCdmaSSM.getCdmaSubscriptionSource());
         }
 
         // If this is on APM off, SIM may already be loaded. Send setPreferredNetworkType
@@ -2196,7 +2188,7 @@ public class GsmCdmaPhone extends Phone {
 
             case EVENT_CDMA_SUBSCRIPTION_SOURCE_CHANGED:
                 logd("EVENT_CDMA_SUBSCRIPTION_SOURCE_CHANGED");
-                mCdmaSubscriptionSource = mCdmaSSM.getCdmaSubscriptionSource();
+                handleCdmaSubscriptionSource(mCdmaSSM.getCdmaSubscriptionSource());
                 break;
 
             case EVENT_REGISTERED_TO_NETWORK:
@@ -2296,6 +2288,14 @@ public class GsmCdmaPhone extends Phone {
                 if (cfu.mOnComplete != null) {
                     AsyncResult.forMessage(cfu.mOnComplete, ar.result, ar.exception);
                     cfu.mOnComplete.sendToTarget();
+                }
+                break;
+
+            case EVENT_NV_READY:
+                Rlog.d(LOG_TAG, "Event EVENT_NV_READY Received");
+                SubscriptionInfoUpdater subscriptionInfoUpdater = PhoneFactory.getSubscriptionInfoUpdater();
+                if (subscriptionInfoUpdater != null) {
+                    subscriptionInfoUpdater.updateSubIdForNV(mPhoneId);
                 }
                 break;
 
@@ -2500,6 +2500,22 @@ public class GsmCdmaPhone extends Phone {
             return false;
         } else {
             return true;
+        }
+    }
+
+    //CDMA
+    /**
+     * Handles the call to get the subscription source
+     *
+     * @param newSubscriptionSource holds the new CDMA subscription source value
+     */
+    private void handleCdmaSubscriptionSource(int newSubscriptionSource) {
+        if (newSubscriptionSource != mCdmaSubscriptionSource) {
+            mCdmaSubscriptionSource = newSubscriptionSource;
+            if (newSubscriptionSource == CDMA_SUBSCRIPTION_NV) {
+                // NV is ready when subscription source is NV
+                sendMessage(obtainMessage(EVENT_NV_READY));
+            }
         }
     }
 

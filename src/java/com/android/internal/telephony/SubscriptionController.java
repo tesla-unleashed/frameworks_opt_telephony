@@ -290,13 +290,16 @@ public class SubscriptionController extends ISub.Stub {
                 SubscriptionManager.MNC));
         // FIXME: consider stick this into database too
         String countryIso = getSubscriptionCountryIso(id);
+        int userNwMode = cursor.getInt(cursor.getColumnIndexOrThrow(
+                SubscriptionManager.USER_NETWORK_MODE));
 
         if (VDBG) {
             String iccIdToPrint = SubscriptionInfo.givePrintableIccid(iccId);
             logd("[getSubInfoRecord] id:" + id + " iccid:" + iccIdToPrint + " simSlotIndex:"
                     + simSlotIndex + " displayName:" + displayName + " nameSource:" + nameSource
                     + " iconTint:" + iconTint + " dataRoaming:" + dataRoaming
-                    + " mcc:" + mcc + " mnc:" + mnc + " countIso:" + countryIso);
+                    + " mcc:" + mcc + " mnc:" + mnc + " countIso:" + countryIso
+                    + " userNwMode:" + userNwMode);
         }
 
         // If line1number has been set to a different number, use it instead.
@@ -305,7 +308,8 @@ public class SubscriptionController extends ISub.Stub {
             number = line1Number;
         }
         return new SubscriptionInfo(id, iccId, simSlotIndex, displayName, carrierName,
-                nameSource, iconTint, number, dataRoaming, iconBitmap, mcc, mnc, countryIso);
+                nameSource, iconTint, number, dataRoaming, iconBitmap, mcc, mnc,
+                countryIso, userNwMode);
     }
 
     /**
@@ -774,6 +778,19 @@ public class SubscriptionController extends ISub.Stub {
                                 setDefaultSmsSubId(subId);
                                 setDefaultVoiceSubId(subId);
                             }
+
+                            // FIXME: Workaround the scenario where default sms subid is not
+                            // being set externally
+                            // CYNGNOS-2185
+                            int phoneId = SubscriptionController.getInstance().getPhoneId(
+                                    getDefaultSmsSubId());
+                            if (phoneId < 0 || phoneId >= TelephonyManager.getDefault()
+                                    .getPhoneCount()) {
+                                Rlog.i(LOG_TAG, "Subscription is invalid. Set default to " + subId);
+                                setDefaultSmsSubId(subId);
+                                PhoneFactory.setSMSPromptEnabled(subIdCountMax > 1);
+                            }
+
                         } else {
                             if (DBG) {
                                 logdl("[addSubInfoRecord] currentSubId != null"
@@ -821,6 +838,10 @@ public class SubscriptionController extends ISub.Stub {
             sPhones[slotId].updateDataConnectionTracker();
 
             if (DBG) logdl("[addSubInfoRecord]- info size=" + sSlotIdxToSubId.size());
+
+            if (PhoneFactory.getSubscriptionInfoUpdater().getInsertedSimCount() <= 1) {
+                PhoneFactory.setSMSPromptEnabled(false);
+            }
 
         } finally {
             Binder.restoreCallingIdentity(identity);
@@ -887,18 +908,22 @@ public class SubscriptionController extends ISub.Stub {
 
         // Now that all security checks passes, perform the operation as ourselves.
         final long identity = Binder.clearCallingIdentity();
+        int result = -1;
         try {
             ContentValues value = new ContentValues(1);
             value.put(SubscriptionManager.CARRIER_NAME, text);
 
-            int result = mContext.getContentResolver().update(SubscriptionManager.CONTENT_URI,
+            result = mContext.getContentResolver().update(SubscriptionManager.CONTENT_URI,
                     value, SubscriptionManager.UNIQUE_KEY_SUBSCRIPTION_ID + "=" +
                     Long.toString(subId), null);
             notifySubscriptionInfoChanged();
 
             return result;
+        } catch (android.database.sqlite.SQLiteDiskIOException e) {
+            e.printStackTrace();
         } finally {
             Binder.restoreCallingIdentity(identity);
+            return result;
         }
     }
 

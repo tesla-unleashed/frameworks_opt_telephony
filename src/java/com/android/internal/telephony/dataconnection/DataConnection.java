@@ -833,6 +833,11 @@ public class DataConnection extends StateMachine {
             }
         }
         mLinkProperties.setTcpBufferSizes(sizes);
+
+        int segments = SystemProperties.getInt("net.tcp.delack." + ratName, 1);
+        mLinkProperties.setTcpDelayedAckSegments(segments);
+        int usercfg = SystemProperties.getInt("net.tcp.usercfg." + ratName, 0);
+        mLinkProperties.setTcpUserCfg(usercfg);
     }
 
     /**
@@ -1559,6 +1564,24 @@ public class DataConnection extends StateMachine {
     private class DcActiveState extends State {
         @Override public void enter() {
             if (DBG) log("DcActiveState: enter dc=" + DataConnection.this);
+
+            // verify and get updated information in case these things
+            // are obsolete
+            {
+                ServiceState ss = mPhone.getServiceState();
+                final int networkType = ss.getDataNetworkType();
+                if (mNetworkInfo.getSubtype() != networkType) {
+                    log("DcActiveState with incorrect subtype (" + mNetworkInfo.getSubtype() +
+                            ", " + networkType + "), updating.");
+                }
+                mNetworkInfo.setSubtype(networkType, TelephonyManager.getNetworkTypeName(networkType));
+                final boolean roaming = ss.getDataRoaming();
+                if (roaming != mNetworkInfo.isRoaming()) {
+                    log("DcActiveState with incorrect roaming (" + mNetworkInfo.isRoaming() +
+                            ", " + roaming +"), updating.");
+                }
+                mNetworkInfo.setRoaming(roaming);
+            }
 
             boolean createNetworkAgent = true;
             // If a disconnect is already pending, avoid notifying all of connected
